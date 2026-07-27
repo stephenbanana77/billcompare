@@ -20,10 +20,63 @@ type ModelResult = {
   lineItems?: VisionLineItem[];
 };
 
+type CompactPrimaryResult = {
+  m?: [string | null, string | null, string | null, string | null, string | null];
+  p?: [string | null, number | null, string | null];
+  f?: Partial<Record<VisionFieldKey, [number | string | null, string | null, number | null, number | null]>>;
+  a?: Array<[
+    string,
+    string | number | null,
+    string | null,
+    number | null,
+    number | null,
+    string | null,
+    string | null,
+  ]>;
+};
+
 type VisionConfig = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  timeoutMs: number;
+  maxRetries: number;
+  retryDelayMs: number;
+  primaryMaxTokens: number;
+  salesDetailMaxTokens: number;
+  feeDetailMaxTokens: number;
+};
+
+const envNumber = (name: string, fallback: number, minimum = 0) => {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
+};
+
+const transientErrorCodes = new Set([
+  'ECONNABORTED',
+  'ECONNRESET',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+]);
+
+const isTransientUpstreamError = (error: unknown) => {
+  const candidate = error as {
+    code?: string;
+    response?: { status?: number };
+  };
+  const status = candidate.response?.status;
+  return (
+    transientErrorCodes.has(String(candidate.code ?? '')) ||
+    status === 429 ||
+    (typeof status === 'number' && status >= 500)
+  );
+};
+
+const parseModelJson = <T>(content: string): T => {
+  let normalized = content.trim().replace(/^\uFEFF/, '');
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(normalized);
+  if (fenced) normalized = fenced[1].trim();
+  return JSON.parse(normalized) as T;
 };
 
 const extractionPrompt = `你是财务结算单识别助手。只根据图片中清晰可见的信息返回 JSON，不得猜测、补全或计算不可见金额。
@@ -55,7 +108,21 @@ const verificationPrompt = `Independently verify the settlement-bill values visi
 
 const salesDetailPrompt = `Transcribe only the sales/purchase settlement detail table from this document. Return JSON only as { "lineItems": [...] }. Output one item for every visible horizontal body row between the table header and bottom border, including rows containing only dashes, adjustments, subtotal, and total. Never omit an empty-value row when its row label is printed. Each item is { "section":"商品销售与进货结算明细", "label":string, "rowType":"detail|adjustment|subtotal|total|empty", "sequence":number, "values":object, "rawText":string|null, "page":number|null, "confidence":number|null }. Copy every printed column name and cell value exactly. Do not extract the separate period summary or fee table.`;
 
+const compactSalesDetailPrompt = `Transcribe only the sales/purchase settlement detail table as compact rows. Output JSON immediately with no explanation as {"rows":[]}. Return every visible body row in order, including adjustment, subtotal, total and printed empty rows. Each row is {"label":string,"rowType":"detail|adjustment|subtotal|total|empty","values":[类别,结算扣率,销售数量,销售金额,销售毛利含调整,税率,含税销售成本含调整]}. Copy printed text and numbers exactly. Use null for blank cells. Do not include the table header, summary, or fee tables. Start with { and end with }.`;
+
+const salesDetailColumns = [
+  '类别',
+  '结算扣率',
+  '销售数量',
+  '销售金额',
+  '销售毛利(含调整)',
+  '税率',
+  '含税销售成本(含调整)',
+] as const;
+
 const feeDetailPrompt = `Transcribe only the deduction/fee detail table from this document. Return JSON only as { "lineItems": [...] }. For each A/B/C group, split every printed fee-name and amount pair into one atomic item. Also preserve printed group subtotal rows and the grand total row. Each item is { "section":"扣款费用明细", "label":string, "rowType":"detail|subtotal|total|empty", "sequence":number, "values":{"费用代码":string|null,"金额":number|string|null,"分组":string|null}, "rawText":string|null, "page":number|null, "confidence":number|null }. Never combine multiple fees into one item. Do not extract the sales table or period summary.`;
+
+const compactFeeDetailPrompt = `Transcribe only the deduction/fee detail table as compact fee rows. Output JSON immediately as {"rows":[]}. Return every printed fee-name and amount pair as one atomic row, followed by each printed A/B/C subtotal and the grand total. Each row is [label,rowType,feeCode,amount,group], where rowType is detail, subtotal, total, or empty. Never combine fees. Use null for blank cells. Do not extract the sales table or period summary. Start with { and end with }.`;
 
 const evidenceFirstAddendum = `This is a finance document extraction task. Follow this procedure before producing JSON:
 1. Find the printed field label and its printed value in the image. Read the label and digits together.
@@ -67,6 +134,69 @@ const evidenceFirstAddendum = `This is a finance document extraction task. Follo
 7. Return additionalFields for every important labeled header, summary, and fee field that does not fit the standard fields. Each item is { label, value, rawText, page, confidence, group, suggestedTarget }. group is header, summary, fee, or other. suggestedTarget may be one of brandMerchantName, brandName, storeName, storeCode, settlementNo, salesQuantity, taxAmount, netPurchaseAmount, businessMode, counterLocation, productCategory, settlementDate, documentDate, printSequence, previousBalance, or null. A field literally labeled 商场 that describes a floor/counter scenario is counterLocation; 联销 or another settlement method is businessMode.
 8. Return top-level periodEvidence as { rawText, page, kind }. rawText must be the exact visible period text. kind is explicit_range only when both start and end dates are printed, month_only when only YYYY-MM is printed, inferred when the dates were derived, or unknown. Never claim that a derived first day was printed in the PDF. Do not extract detail-table rows in this response.`;
 const metadataSemanticsAddendum = `Metadata semantics: mallName is the mall/project name. storeName is an actual shop name or the brand shown on a "brand" label. Never put a merchant legal entity, supplier, or brand operator into storeName. Put those legal-entity fields in additionalFields with suggestedTarget "brandMerchantName". Put a printed bill/settlement number in additionalFields with suggestedTarget "settlementNo".`;
+
+const compactExtractionPrompt = `Extract compact primary bill data from this Chinese mall settlement bill. Output JSON immediately with no explanation as {"m":[],"p":[],"f":{},"a":[]}.
+m=[mallName,storeName,storeCode,period,billType]. period is the exact printed YYYY-MM or date range. billType is standard, complex, or changed_format.
+p=[exactPeriodText,page,kind], where kind is explicit_range, month_only, inferred, or unknown.
+f may contain only salesAmount, refundAmount, commissionAmount, activityFee, invoiceAmount, deductionTotal, settlementAmount. Each value is [number,exactLabelAndNumber,page,confidence]. Copy printed numbers exactly; never calculate. Use null when unclear. Use only a printed summary value for activityFee.
+a contains only directly visible extra fields, each as [label,value,exactText,page,confidence,group,suggestedTarget]. suggestedTarget may be brandMerchantName, brandName, settlementNo, salesQuantity, businessMode, counterLocation, settlementDate, documentDate, or printSequence. mallName is the project or mall. storeName is the printed brand, never a legal company. Start with { and end with }.`;
+
+const expandPrimaryResult = (input: ModelResult | CompactPrimaryResult): ModelResult => {
+  const compact = input as CompactPrimaryResult;
+  if (!Array.isArray(compact.m) && (!compact.f || typeof compact.f !== 'object')) {
+    return input as ModelResult;
+  }
+  const metadata = compact.m ?? [];
+  const period = metadata[3] ?? '';
+  const fields = Object.fromEntries(
+    Object.entries(compact.f ?? {}).map(([key, value]) => [
+      key,
+      {
+        value: value?.[0] ?? null,
+        rawText: value?.[1] ?? null,
+        page: value?.[2] ?? null,
+        confidence: typeof value?.[3] === 'number' ? value[3] : null,
+      },
+    ]),
+  ) as ModelResult['fields'];
+  const activityRawText = String(fields.activityFee?.rawText ?? '');
+  if (/扣款|实付|发票/.test(activityRawText)) {
+    fields.activityFee = {
+      ...fields.activityFee,
+      value: null,
+      confidence: null,
+    };
+  }
+  return {
+    metadata: {
+      mallName: metadata[0] ?? '',
+      storeName: metadata[1] ?? '',
+      storeCode: metadata[2] ?? '',
+      periodStart: period,
+      periodEnd: period,
+      billType: ['standard', 'complex', 'changed_format'].includes(metadata[4] ?? '')
+        ? metadata[4] as VisionExtractionResult['metadata']['billType']
+        : 'standard',
+    },
+    periodEvidence: compact.p ? {
+      rawText: compact.p[0],
+      page: compact.p[1],
+      kind: ['explicit_range', 'month_only', 'inferred', 'unknown'].includes(compact.p[2] ?? '')
+        ? compact.p[2] as NonNullable<VisionExtractionResult['periodEvidence']>['kind']
+        : 'unknown',
+    } : undefined,
+    fields,
+    additionalFields: (compact.a ?? []).map((item) => ({
+      label: item[0],
+      value: item[1],
+      rawText: item[2],
+      page: item[3],
+      confidence: typeof item[4] === 'number' ? item[4] : null,
+      group: item[5] as VisionAdditionalField['group'],
+      suggestedTarget: item[6],
+    })),
+  };
+};
 
 const money = (value: unknown): number | null => {
   if (value === null || value === undefined || value === '') return null;
@@ -90,15 +220,21 @@ export class VisionExtractionService {
       baseUrl: String(process.env.VISION_LLM_BASE_URL ?? '').replace(/\/$/, ''),
       apiKey: String(process.env.VISION_LLM_API_KEY ?? ''),
       model: String(process.env.VISION_LLM_MODEL ?? 'minimax/minimax-m3'),
+      timeoutMs: envNumber('VISION_LLM_TIMEOUT_MS', 120_000, 1),
+      maxRetries: envNumber('VISION_LLM_MAX_RETRIES', 1),
+      retryDelayMs: envNumber('VISION_LLM_RETRY_DELAY_MS', 1500),
+      primaryMaxTokens: envNumber('VISION_LLM_PRIMARY_MAX_TOKENS', 4000, 1),
+      salesDetailMaxTokens: envNumber('VISION_LLM_SALES_MAX_TOKENS', 3500, 1),
+      feeDetailMaxTokens: envNumber('VISION_LLM_FEE_MAX_TOKENS', 3000, 1),
     };
   private readonly client: Pick<AxiosInstance, 'post'> = axios.create({
     baseURL: this.config.baseUrl,
-    timeout: 90_000,
+    timeout: this.config.timeoutMs,
   });
 
   private async postWithRetry(path: string, payload: unknown) {
     let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
       try {
         return await this.client.post(path, payload, {
           headers: {
@@ -108,10 +244,46 @@ export class VisionExtractionService {
         });
       } catch (error) {
         lastError = error;
-        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (attempt >= this.config.maxRetries || !isTransientUpstreamError(error)) {
+          throw error;
+        }
+        const delayMs = this.config.retryDelayMs * (2 ** attempt);
+        if (delayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       }
     }
     throw lastError;
+  }
+
+  private async requestPrimaryResult(payload: unknown): Promise<ModelResult> {
+    let lastContent = '';
+    let lastFinishReason: unknown;
+    let lastUsage: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await this.postWithRetry('/chat/completions', payload);
+      const content = response.data?.choices?.[0]?.message?.content;
+      lastFinishReason = response.data?.choices?.[0]?.finish_reason;
+      lastUsage = response.data?.usage;
+      lastContent = typeof content === 'string' ? content : '';
+      try {
+        const parsed = parseModelJson<ModelResult | CompactPrimaryResult>(lastContent);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return expandPrimaryResult(parsed);
+        }
+      } catch {
+        // Retry once when the provider returns empty, fenced-truncated, or non-JSON output.
+      }
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    console.warn('[vision-extraction] invalid primary JSON', {
+      length: lastContent.length,
+      finishReason: lastFinishReason,
+      usage: lastUsage,
+    });
+    throw new BadRequestException('视觉模型返回格式错误，请重试或使用 Excel 导入。');
   }
 
   async extractFromImages(
@@ -130,19 +302,13 @@ export class VisionExtractionService {
       model: this.config.model,
       temperature: 0,
       reasoning_effort: 'low',
-      max_completion_tokens: 4000,
+      max_completion_tokens: this.config.primaryMaxTokens,
       response_format: { type: 'json_object' },
       messages: [
         {
           role: 'user',
           content: [
-            { type: 'text', text: extractionPrompt },
-            { type: 'text', text: evidenceFirstAddendum },
-            { type: 'text', text: metadataSemanticsAddendum },
-            {
-              type: 'text',
-              text: `Also return fields.invoiceAmount and fields.deductionTotal using the same { value, rawText, page, confidence } shape. For a monthly bill headed only YYYY-MM, set periodStart to the first calendar day and periodEnd to the last calendar day. For every monetary value, copy the exact printed number, preserve two decimals, and set confidence below 0.9 whenever it was inferred, summed, or visually uncertain.`,
-            },
+            { type: 'text', text: compactExtractionPrompt },
             ...images.map((image) => ({
               type: 'image_url',
               image_url: {
@@ -154,21 +320,13 @@ export class VisionExtractionService {
         },
       ],
     };
-    const primaryRequest = this.postWithRetry(
-      '/chat/completions',
-      primaryPayload,
-    );
-    const [response, extractedLineItems] = await Promise.all([
-      primaryRequest,
-      this.extractLineItems(images).catch(() => []),
-    ]);
-    const content = response.data?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') {
-      throw new BadRequestException('视觉模型未返回可解析的识别结果，请重试。');
-    }
+    const primary = await this.requestPrimaryResult(primaryPayload);
+
+    const extractedLineItems = await this.extractLineItems(images);
     try {
-      const primary = JSON.parse(content) as ModelResult;
-      const lineItems = extractedLineItems.length ? extractedLineItems : (primary.lineItems ?? []);
+      const lineItems = extractedLineItems.length
+        ? extractedLineItems
+        : (Array.isArray(primary.lineItems) ? primary.lineItems : []);
       return this.normalizeModelResult(
         {
           ...primary,
@@ -178,6 +336,7 @@ export class VisionExtractionService {
       );
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
+      console.warn('[vision-extraction] result normalization failed', error);
       throw new BadRequestException('视觉模型返回格式错误，请重试或使用 Excel 导入。');
     }
   }
@@ -188,7 +347,7 @@ export class VisionExtractionService {
   ): Promise<VisionRefinementResult> {
     if (!images.length || !candidates.length) return { items: [] };
     const candidateJson = JSON.stringify(candidates.slice(0, 16));
-    const response = await this.client.post(
+    const response = await this.postWithRetry(
       '/chat/completions',
       {
         model: this.config.model,
@@ -213,16 +372,10 @@ export class VisionExtractionService {
           ],
         }],
       },
-      {
-        headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      },
     );
     const content = response.data?.choices?.[0]?.message?.content;
     if (typeof content !== 'string') return { items: [] };
-    const parsed = JSON.parse(content) as VisionRefinementResult;
+    const parsed = parseModelJson<VisionRefinementResult>(content);
     const candidateIds = new Set(candidates.map((candidate) => candidate.id));
     return {
       items: (parsed.items ?? []).filter((item) =>
@@ -232,7 +385,7 @@ export class VisionExtractionService {
   }
 
   private async verifyFields(images: Buffer[]): Promise<Partial<Record<VisionFieldKey, ModelField>>> {
-    const response = await this.client.post(
+    const response = await this.postWithRetry(
       '/chat/completions',
       {
         model: this.config.model,
@@ -254,25 +407,137 @@ export class VisionExtractionService {
           ],
         }],
       },
-      {
-        headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      },
     );
     const content = response.data?.choices?.[0]?.message?.content;
     if (typeof content !== 'string') return {};
-    const parsed = JSON.parse(content) as { fields?: Partial<Record<VisionFieldKey, ModelField>> };
+    const parsed = parseModelJson<{
+      fields?: Partial<Record<VisionFieldKey, ModelField>>;
+    }>(content);
     return parsed.fields ?? {};
   }
 
   private async extractLineItems(images: Buffer[]): Promise<VisionLineItem[]> {
-    const [salesItems, feeItems] = await Promise.all([
-      this.extractLineItemsWithPrompt(images, salesDetailPrompt, 3500),
-      this.extractLineItemsWithPrompt(images, feeDetailPrompt, 3000),
-    ]);
+    const salesItems = await this.extractCompactSalesLineItems(
+      images,
+    ).catch(() => []);
+    const feeItems = await this.extractCompactFeeLineItems(images).catch((error) => {
+      console.warn('[vision-extraction] fee detail extraction failed', error);
+      return [];
+    });
     return [...salesItems, ...feeItems];
+  }
+
+  private async extractCompactFeeLineItems(images: Buffer[]): Promise<VisionLineItem[]> {
+    const response = await this.postWithRetry('/chat/completions', {
+      model: this.config.model,
+      temperature: 0,
+      reasoning_effort: 'low',
+      max_completion_tokens: this.config.feeDetailMaxTokens,
+      response_format: { type: 'json_object' },
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: compactFeeDetailPrompt },
+          ...images.map((image) => ({
+            type: 'image_url',
+            image_url: {
+              url: `data:image/png;base64,${image.toString('base64')}`,
+              detail: 'high',
+            },
+          })),
+        ],
+      }],
+    });
+    const content = response.data?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') {
+      console.warn('[vision-extraction] empty fee detail response', {
+        finishReason: response.data?.choices?.[0]?.finish_reason,
+        usage: response.data?.usage,
+      });
+      return [];
+    }
+    const parsed = parseModelJson<{
+      lineItems?: VisionLineItem[];
+      rows?: Array<[
+        string,
+        VisionLineItem['rowType'],
+        string | null,
+        string | number | null,
+        string | null,
+      ]>;
+    }>(content);
+    if (parsed.lineItems?.length) return parsed.lineItems;
+    return (parsed.rows ?? []).map((row, index) => ({
+      section: '扣款费用明细',
+      label: row[0],
+      rowType: row[1] ?? 'detail',
+      sequence: index + 1,
+      values: {
+        费用代码: row[2] ?? '',
+        金额: row[3] ?? '',
+        分组: row[4] ?? '',
+      },
+      rawText: null,
+      page: 1,
+      confidence: null,
+    }));
+  }
+
+  private async extractCompactSalesLineItems(
+    images: Buffer[],
+  ): Promise<VisionLineItem[]> {
+    const response = await this.postWithRetry(
+      '/chat/completions',
+      {
+        model: this.config.model,
+        temperature: 0,
+        reasoning_effort: 'low',
+        max_completion_tokens: this.config.salesDetailMaxTokens,
+        response_format: { type: 'json_object' },
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: compactSalesDetailPrompt },
+            ...images.map((image) => ({
+              type: 'image_url',
+              image_url: {
+                url: `data:image/png;base64,${image.toString('base64')}`,
+                detail: 'high',
+              },
+            })),
+          ],
+        }],
+      },
+    );
+    const content = response.data?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') return [];
+    const parsed = parseModelJson<{
+      lineItems?: VisionLineItem[];
+      rows?: Array<{
+        label?: string;
+        rowType?: VisionLineItem['rowType'];
+        values?: Array<string | number | null>;
+      }>;
+    }>(content);
+    if (parsed.lineItems?.length) return parsed.lineItems;
+    return (parsed.rows ?? []).map((row, index) => {
+      const values: Record<string, string | number> = Object.fromEntries(
+        salesDetailColumns.map((column, columnIndex) => [
+          column,
+          row.values?.[columnIndex] ?? '',
+        ]),
+      );
+      return {
+        section: '商品销售与进货结算明细',
+        label: row.label?.trim() || `第 ${index + 1} 行`,
+        rowType: row.rowType ?? 'detail',
+        sequence: index + 1,
+        values,
+        rawText: null,
+        page: 1,
+        confidence: null,
+      };
+    });
   }
 
   private async extractLineItemsWithPrompt(
@@ -280,7 +545,7 @@ export class VisionExtractionService {
     prompt: string,
     maxCompletionTokens: number,
   ): Promise<VisionLineItem[]> {
-    const response = await this.client.post(
+    const response = await this.postWithRetry(
       '/chat/completions',
       {
         model: this.config.model,
@@ -302,16 +567,10 @@ export class VisionExtractionService {
           ],
         }],
       },
-      {
-        headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-      },
     );
     const content = response.data?.choices?.[0]?.message?.content;
     if (typeof content !== 'string') return [];
-    const parsed = JSON.parse(content) as { lineItems?: VisionLineItem[] };
+    const parsed = parseModelJson<{ lineItems?: VisionLineItem[] }>(content);
     return parsed.lineItems ?? [];
   }
 
@@ -391,7 +650,7 @@ export class VisionExtractionService {
 }
 
 function normalizeAdditionalFields(input: VisionAdditionalField[] | undefined) {
-  return (input ?? [])
+  return (Array.isArray(input) ? input : [])
     .filter((field) => field && typeof field.label === 'string' && field.label.trim())
     .map((field) => ({
       ...field,
@@ -406,7 +665,7 @@ function normalizeAdditionalFields(input: VisionAdditionalField[] | undefined) {
 }
 
 function normalizeLineItems(input: VisionLineItem[] | undefined) {
-  return (input ?? [])
+  return (Array.isArray(input) ? input : [])
     .filter((item) => item && typeof item.label === 'string' && item.label.trim())
     .map((item) => ({
       ...item,
@@ -423,15 +682,24 @@ function normalizeLineItems(input: VisionLineItem[] | undefined) {
     }));
 }
 
-function normalizeMonthlyPeriod(metadata: VisionExtractionResult['metadata']) {
-  const periodStart = metadata.periodStart?.trim() ?? '';
-  const periodEnd = metadata.periodEnd?.trim() ?? '';
+function normalizeMonthlyPeriod(metadata: VisionExtractionResult['metadata'] | undefined) {
+  const normalized = {
+    mallName: '',
+    storeName: '',
+    storeCode: '',
+    periodStart: '',
+    periodEnd: '',
+    billType: 'standard' as const,
+    ...(metadata ?? {}),
+  };
+  const periodStart = normalized.periodStart?.trim() ?? '';
+  const periodEnd = normalized.periodEnd?.trim() ?? '';
   const month = /^([12]\d{3})-(0[1-9]|1[0-2])$/.exec(periodStart || periodEnd);
-  if (!month) return metadata;
+  if (!month) return normalized;
   const [, year, monthNumber] = month;
   const lastDay = new Date(Number(year), Number(monthNumber), 0).getDate();
   return {
-    ...metadata,
+    ...normalized,
     periodStart: `${year}-${monthNumber}-01`,
     periodEnd: `${year}-${monthNumber}-${String(lastDay).padStart(2, '0')}`,
   };
@@ -441,7 +709,9 @@ function normalizePeriodEvidence(input: ModelResult): VisionExtractionResult['pe
   const evidence = input.periodEvidence;
   if (evidence && ['explicit_range', 'month_only', 'inferred', 'unknown'].includes(evidence.kind)) {
     return {
-      rawText: evidence.rawText?.trim() || null,
+      rawText: evidence.rawText === null || evidence.rawText === undefined
+        ? null
+        : String(evidence.rawText).trim() || null,
       page: Number.isFinite(evidence.page) ? evidence.page : null,
       kind: evidence.kind,
     };
