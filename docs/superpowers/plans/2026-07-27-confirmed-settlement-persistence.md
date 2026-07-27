@@ -701,6 +701,14 @@ git commit -m "feat: confirm recognized bills through backend"
 
 Use the same migration execution path used for migrations 001-006 in the target environment. Verify with:
 
+For Miaoda development databases, run the migration through the platform DDL
+channel rather than the public `SUDA_DATABASE_URL` connection:
+
+```powershell
+lark-cli apps +db-execute --app-id <app-id> --environment dev --file ./migrations/007_confirmed_settlement_bills.sql --dry-run --as user
+lark-cli apps +db-execute --app-id <app-id> --environment dev --file ./migrations/007_confirmed_settlement_bills.sql --yes --as user
+```
+
 ```sql
 SELECT table_name
 FROM information_schema.tables

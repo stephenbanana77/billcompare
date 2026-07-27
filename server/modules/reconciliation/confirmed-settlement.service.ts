@@ -51,7 +51,7 @@ export class ConfirmedSettlementService {
 
     const id = await this.db.transaction(async (tx) => {
       await tx.execute(
-        sql`select pg_advisory_xact_lock(hashtext(${identityKey}))`,
+        sql`select 1 as locked from pg_advisory_xact_lock(hashtext(${identityKey}))`,
       );
       const confirmedAt = new Date().toISOString();
       const identityConditions = [

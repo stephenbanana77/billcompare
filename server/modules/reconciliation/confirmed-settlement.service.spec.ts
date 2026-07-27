@@ -432,6 +432,7 @@ describe('ConfirmedSettlementService', () => {
       .map(sqlQuery)
       .find((query) => query.params.includes('confirmed'));
     expect(lock.sql).toContain('pg_advisory_xact_lock');
+    expect(lock.sql).toContain('select 1 as locked from');
     expect(lock.params).toContain(JSON.stringify(identity));
     expect(activeQuery?.params).toEqual(
       expect.arrayContaining([...identity, 'confirmed']),
