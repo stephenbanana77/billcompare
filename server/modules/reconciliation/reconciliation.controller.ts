@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Put,
+  Query,
   BadRequestException,
   UploadedFiles,
   UseInterceptors,
@@ -16,6 +17,7 @@ import type {
   CreateJobInput,
   CreateEmailSourceInput,
   CreateRuleInput,
+  ConfirmSettlementBillInput,
   IngestInboundEmailInput,
   ImportReceiptsInput,
   ResolveIssueInput,
@@ -26,6 +28,7 @@ import type {
 import { ReconciliationService } from './reconciliation.service';
 import { VisionExtractionService } from './vision-extraction.service';
 import { PaddleOcrService } from './ocr/paddle-ocr.service';
+import { ConfirmedSettlementService } from './confirmed-settlement.service';
 
 type UploadedImagePage = {
   buffer: Buffer;
@@ -39,7 +42,33 @@ export class ReconciliationController {
     private readonly service: ReconciliationService,
     private readonly visionExtractionService: VisionExtractionService,
     private readonly paddleOcrService: PaddleOcrService,
+    private readonly confirmedSettlementService: ConfirmedSettlementService,
   ) {}
+
+  @Post('confirmed-settlements')
+  confirmSettlement(@Body() input: ConfirmSettlementBillInput) {
+    return this.confirmedSettlementService.confirm(input);
+  }
+
+  @Get('confirmed-settlements')
+  listConfirmedSettlements(
+    @Query('storeCode') storeCode?: string,
+    @Query('periodStart') periodStart?: string,
+    @Query('periodEnd') periodEnd?: string,
+    @Query('includeHistory') includeHistory?: string,
+  ) {
+    return this.confirmedSettlementService.list({
+      storeCode: storeCode?.trim() || undefined,
+      periodStart: periodStart?.trim() || undefined,
+      periodEnd: periodEnd?.trim() || undefined,
+      includeHistory: includeHistory === 'true',
+    });
+  }
+
+  @Get('confirmed-settlements/:id')
+  getConfirmedSettlement(@Param('id') id: string) {
+    return this.confirmedSettlementService.getById(id);
+  }
 
   @Post('ocr-extractions')
   @UseInterceptors(
@@ -48,11 +77,14 @@ export class ReconciliationController {
     }),
   )
   async extractOcrBill(@UploadedFiles() pages: UploadedImagePage[]) {
-    if (!pages?.length) throw new BadRequestException('请上传需要OCR识别的页面图片。');
+    if (!pages?.length)
+      throw new BadRequestException('请上传需要OCR识别的页面图片。');
     if (pages.some((page) => !/^image\/(png|jpeg|webp)$/.test(page.mimetype))) {
       throw new BadRequestException('OCR仅接受PNG、JPEG或WebP页面图片。');
     }
-    return this.paddleOcrService.extractFromImages(pages.map((page) => page.buffer));
+    return this.paddleOcrService.extractFromImages(
+      pages.map((page) => page.buffer),
+    );
   }
 
   @Post('vision-extractions')
@@ -69,7 +101,9 @@ export class ReconciliationController {
       throw new BadRequestException('请上传待识别结算单的页面图片。');
     }
     if (pages.some((page) => !/^image\/(png|jpeg|webp)$/.test(page.mimetype))) {
-      throw new BadRequestException('视觉识别仅接受 PNG、JPEG 或 WebP 页面图片。');
+      throw new BadRequestException(
+        '视觉识别仅接受 PNG、JPEG 或 WebP 页面图片。',
+      );
     }
     return this.visionExtractionService.extractFromImages(
       fileName?.trim() || pages[0].originalname,
@@ -87,13 +121,16 @@ export class ReconciliationController {
     @UploadedFiles() tiles: UploadedImagePage[],
     @Body('candidates') candidateJson?: string,
   ) {
-    if (!tiles?.length) throw new BadRequestException('请上传用于二次复核的高清局部图片。');
+    if (!tiles?.length)
+      throw new BadRequestException('请上传用于二次复核的高清局部图片。');
     if (tiles.some((tile) => !/^image\/(png|jpeg|webp)$/.test(tile.mimetype))) {
       throw new BadRequestException('二次复核仅接受 PNG、JPEG 或 WebP 图片。');
     }
     let candidates: VisionRefinementCandidate[];
     try {
-      candidates = JSON.parse(candidateJson || '[]') as VisionRefinementCandidate[];
+      candidates = JSON.parse(
+        candidateJson || '[]',
+      ) as VisionRefinementCandidate[];
     } catch {
       throw new BadRequestException('二次复核字段格式无效。');
     }
@@ -168,10 +205,7 @@ export class ReconciliationController {
   }
 
   @Post('jobs/:id/receipts')
-  importReceipts(
-    @Param('id') id: string,
-    @Body() input: ImportReceiptsInput,
-  ) {
+  importReceipts(@Param('id') id: string, @Body() input: ImportReceiptsInput) {
     return this.service.importReceipts(id, input);
   }
 
