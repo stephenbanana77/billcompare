@@ -197,7 +197,20 @@
   },
   "jest": {
     "preset": "ts-jest",
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "diagnostics": false,
+          "tsconfig": "tsconfig.spec.json"
+        }
+      ]
+    },
     "testEnvironment": "node",
+    "moduleNameMapper": {
+      "^@server/(.*)$": "<rootDir>/server/$1",
+      "^@shared/(.*)$": "<rootDir>/shared/$1"
+    },
     "testMatch": [
       "<rootDir>/server/**/*.spec.ts",
       "<rootDir>/test/unit/**/*.spec.ts"

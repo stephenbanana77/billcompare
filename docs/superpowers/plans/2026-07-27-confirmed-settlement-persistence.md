@@ -516,6 +516,8 @@ git commit -m "feat: persist confirmed settlement versions"
 
 ## Task 5: REST Confirmation And Query Endpoints
 
+> Scope note: these endpoints use the platform's existing global authentication. Store, region, and finance/admin authorization is intentionally deferred to the separately approved permissions and analytics plan.
+
 **Files:**
 
 - Modify: `server/modules/reconciliation/reconciliation.module.ts`

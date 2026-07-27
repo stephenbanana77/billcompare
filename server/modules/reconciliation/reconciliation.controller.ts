@@ -36,6 +36,134 @@ type UploadedImagePage = {
   originalname: string;
 };
 
+const billTypes = new Set(['standard', 'complex', 'changed_format']);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const invalidRequest: (message: string) => never = (message) => {
+  throw new BadRequestException(message);
+};
+
+const assertConfirmationInput: (
+  input: unknown,
+) => asserts input is ConfirmSettlementBillInput = (input) => {
+  if (!isRecord(input)) invalidRequest('request body must be an object');
+  if (typeof input.fileName !== 'string' || !input.fileName.trim()) {
+    invalidRequest('fileName is required');
+  }
+  if (typeof input.ocrVerified !== 'boolean') {
+    invalidRequest('ocrVerified must be a boolean');
+  }
+  if (!Array.isArray(input.reviewedFields)) {
+    invalidRequest('reviewedFields must be an array');
+  }
+  if (
+    input.reviewedFields.some(
+      (field) =>
+        !isRecord(field) ||
+        typeof field.id !== 'string' ||
+        typeof field.label !== 'string' ||
+        typeof field.target !== 'string' ||
+        (!['string', 'number'].includes(typeof field.value) &&
+          field.value !== null),
+    )
+  ) {
+    invalidRequest('reviewedFields contains an invalid field');
+  }
+
+  const extraction = input.extraction;
+  if (!isRecord(extraction)) invalidRequest('extraction must be an object');
+  if (extraction.sourceType !== 'vision_llm') {
+    invalidRequest('extraction.sourceType must be vision_llm');
+  }
+  if (typeof extraction.fileName !== 'string' || !extraction.fileName.trim()) {
+    invalidRequest('extraction.fileName is required');
+  }
+  for (const property of ['headers', 'rows', 'additionalFields', 'warnings']) {
+    if (!Array.isArray(extraction[property])) {
+      invalidRequest(`extraction.${property} must be an array`);
+    }
+  }
+  if (!isRecord(extraction.metadata)) {
+    invalidRequest('extraction.metadata must be an object');
+  }
+  for (const property of [
+    'mallName',
+    'storeName',
+    'storeCode',
+    'periodStart',
+    'periodEnd',
+  ]) {
+    if (typeof extraction.metadata[property] !== 'string') {
+      invalidRequest(`extraction.metadata.${property} must be a string`);
+    }
+  }
+  if (!billTypes.has(String(extraction.metadata.billType))) {
+    invalidRequest('extraction.metadata.billType is invalid');
+  }
+  if (!isRecord(extraction.evidence)) {
+    invalidRequest('extraction.evidence must be an object');
+  }
+  if (!isRecord(extraction.periodEvidence)) {
+    invalidRequest('extraction.periodEvidence must be an object');
+  }
+  const lineItems = extraction.lineItems;
+  if (!Array.isArray(lineItems)) {
+    invalidRequest('extraction.lineItems must be an array');
+  }
+  if (
+    lineItems.some(
+      (line) =>
+        !isRecord(line) ||
+        typeof line.section !== 'string' ||
+        typeof line.label !== 'string' ||
+        !isRecord(line.values),
+    )
+  ) {
+    invalidRequest('extraction.lineItems contains an invalid line');
+  }
+};
+
+const parseQueryText = (value: unknown, name: string): string | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string') {
+    invalidRequest(`${name} must be a string`);
+  }
+  return value.trim() || undefined;
+};
+
+const parseQueryDate = (
+  value: unknown,
+  name: 'periodStart' | 'periodEnd',
+): string | undefined => {
+  const normalized = parseQueryText(value, name);
+  if (!normalized) return undefined;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
+  if (!match) invalidRequest(`${name} must be a valid YYYY-MM-DD date`);
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    year === 0 ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    invalidRequest(`${name} must be a valid YYYY-MM-DD date`);
+  }
+  return normalized;
+};
+
+const parseIncludeHistory = (value: unknown): boolean => {
+  const normalized = parseQueryText(value, 'includeHistory');
+  if (!normalized || normalized === 'false') return false;
+  if (normalized === 'true') return true;
+  return invalidRequest('includeHistory must be true or false');
+};
+
 @Controller('api/reconciliation')
 export class ReconciliationController {
   constructor(
@@ -46,7 +174,8 @@ export class ReconciliationController {
   ) {}
 
   @Post('confirmed-settlements')
-  confirmSettlement(@Body() input: ConfirmSettlementBillInput) {
+  confirmSettlement(@Body() input: unknown) {
+    assertConfirmationInput(input);
     return this.confirmedSettlementService.confirm(input);
   }
 
@@ -57,11 +186,16 @@ export class ReconciliationController {
     @Query('periodEnd') periodEnd?: string,
     @Query('includeHistory') includeHistory?: string,
   ) {
+    const normalizedStart = parseQueryDate(periodStart, 'periodStart');
+    const normalizedEnd = parseQueryDate(periodEnd, 'periodEnd');
+    if (normalizedStart && normalizedEnd && normalizedStart > normalizedEnd) {
+      throw new BadRequestException('periodStart must not be after periodEnd');
+    }
     return this.confirmedSettlementService.list({
-      storeCode: storeCode?.trim() || undefined,
-      periodStart: periodStart?.trim() || undefined,
-      periodEnd: periodEnd?.trim() || undefined,
-      includeHistory: includeHistory === 'true',
+      storeCode: parseQueryText(storeCode, 'storeCode'),
+      periodStart: normalizedStart,
+      periodEnd: normalizedEnd,
+      includeHistory: parseIncludeHistory(includeHistory),
     });
   }
 
