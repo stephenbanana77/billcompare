@@ -65,6 +65,7 @@ pnpm-lock.yaml
 # Agent files
 .agent/
 .claude/
+.worktrees/
 
 # Local application and model runtimes
 .runtime/
