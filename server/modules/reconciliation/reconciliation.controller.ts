@@ -37,12 +37,74 @@ type UploadedImagePage = {
 };
 
 const billTypes = new Set(['standard', 'complex', 'changed_format']);
+const lineRowTypes = new Set([
+  'detail',
+  'adjustment',
+  'subtotal',
+  'total',
+  'empty',
+]);
+const postgresIntegerMax = 2_147_483_647;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const invalidRequest: (message: string) => never = (message) => {
   throw new BadRequestException(message);
+};
+
+const isLineValue = (value: unknown): boolean =>
+  value === null ||
+  typeof value === 'string' ||
+  (typeof value === 'number' && Number.isFinite(value));
+
+const isPositiveInteger = (value: unknown): value is number =>
+  typeof value === 'number' &&
+  Number.isInteger(value) &&
+  value > 0 &&
+  value <= postgresIntegerMax;
+
+const isValidLineItem = (line: unknown): boolean => {
+  if (!isRecord(line)) return false;
+  if (typeof line.section !== 'string' || !line.section.trim()) return false;
+  if (
+    typeof line.label !== 'string' ||
+    !line.label.trim() ||
+    Array.from(line.label).length > 255
+  ) {
+    return false;
+  }
+  if (
+    line.rowType !== undefined &&
+    (typeof line.rowType !== 'string' || !lineRowTypes.has(line.rowType))
+  ) {
+    return false;
+  }
+  if (
+    line.sequence !== undefined &&
+    line.sequence !== null &&
+    !isPositiveInteger(line.sequence)
+  ) {
+    return false;
+  }
+  if (
+    !isRecord(line.values) ||
+    !Object.values(line.values).every(isLineValue)
+  ) {
+    return false;
+  }
+  if (line.rawText !== null && typeof line.rawText !== 'string') return false;
+  if (line.page !== null && !isPositiveInteger(line.page)) return false;
+  if (
+    line.confidence !== null &&
+    (typeof line.confidence !== 'number' ||
+      !Number.isFinite(line.confidence) ||
+      line.confidence < 0 ||
+      line.confidence > 1)
+  ) {
+    return false;
+  }
+  return true;
 };
 
 const assertConfirmationInput: (
@@ -112,15 +174,7 @@ const assertConfirmationInput: (
   if (!Array.isArray(lineItems)) {
     invalidRequest('extraction.lineItems must be an array');
   }
-  if (
-    lineItems.some(
-      (line) =>
-        !isRecord(line) ||
-        typeof line.section !== 'string' ||
-        typeof line.label !== 'string' ||
-        !isRecord(line.values),
-    )
-  ) {
+  if (lineItems.some((line) => !isValidLineItem(line))) {
     invalidRequest('extraction.lineItems contains an invalid line');
   }
 };

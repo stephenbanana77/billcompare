@@ -45,6 +45,29 @@ const validInput = (): ConfirmSettlementBillInput => ({
   ocrVerified: true,
 });
 
+const inputWithLine = (overrides: Record<string, unknown>) => {
+  const input = validInput();
+  return {
+    ...input,
+    extraction: {
+      ...input.extraction,
+      lineItems: [
+        {
+          section: '商品销售明细',
+          label: '销售行',
+          rowType: 'detail',
+          sequence: 1,
+          values: { amount: '100.00' },
+          rawText: null,
+          page: 1,
+          confidence: 0.98,
+          ...overrides,
+        },
+      ],
+    },
+  };
+};
+
 describe('confirmed settlement API contract', () => {
   const detail = { bill: { id: 'bill-1' } } as ConfirmedSettlementDetail;
   const confirmedService = {
@@ -147,6 +170,27 @@ describe('confirmed settlement API contract', () => {
       expect(confirmedService.confirm).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ['rowType', { rowType: 'unknown' }],
+    ['page object', { page: { number: 1 } }],
+    ['fractional page', { page: 1.5 }],
+    ['confidence type', { confidence: '0.98' }],
+    ['confidence range', { confidence: 1.1 }],
+    ['rawText', { rawText: { text: 'sales' } }],
+    ['label length', { label: 'x'.repeat(256) }],
+    ['values entry', { values: { amount: { nested: true } } }],
+    ['sequence', { sequence: 1.5 }],
+  ])('rejects invalid persisted line field %s', (_field, overrides) => {
+    const input = inputWithLine(overrides as Record<string, unknown>);
+
+    expect(() =>
+      controller.confirmSettlement(
+        input as unknown as ConfirmSettlementBillInput,
+      ),
+    ).toThrow(BadRequestException);
+    expect(confirmedService.confirm).not.toHaveBeenCalled();
+  });
 
   it('trims and passes valid list filters to the confirmed service', async () => {
     await controller.listConfirmedSettlements(
