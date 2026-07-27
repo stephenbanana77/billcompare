@@ -368,8 +368,8 @@ export interface ConfirmedSettlementBill {
   billType: VisionExtractionResult['metadata']['billType'];
   settlementNo: string | null;
   salesAmount: string;
-  invoiceAmount: string;
-  deductionTotal: string;
+  invoiceAmount: string | null;
+  deductionTotal: string | null;
   settlementAmount: string;
   ocrVerified: boolean;
   confirmedBy: string;
