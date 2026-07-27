@@ -15,6 +15,12 @@ import type {
   VoucherStatus,
 } from '@shared/reconciliation';
 
+export type {
+  ConfirmSettlementBillInput,
+  ConfirmedSettlementBill,
+  ConfirmedSettlementDetail,
+} from '@shared/reconciliation';
+
 export interface ReconciliationMappingTemplate {
   id: string;
   name: string;

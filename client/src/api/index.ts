@@ -4,6 +4,9 @@ import type {
   CreateJobInput,
   CreateEmailSourceInput,
   CreateRuleInput,
+  ConfirmSettlementBillInput,
+  ConfirmedSettlementBill,
+  ConfirmedSettlementDetail,
   ImportReceiptsInput,
   ResolveIssueInput,
   SyncEmailSourceInput,
@@ -344,6 +347,27 @@ async function request<T>(config: AxiosRequestConfig): Promise<T> {
 }
 
 export const reconciliationApi = {
+  confirmSettlement: (input: ConfirmSettlementBillInput) =>
+    request<ConfirmedSettlementDetail>({
+      url: '/api/reconciliation/confirmed-settlements',
+      method: 'POST',
+      data: input,
+    }),
+  confirmedSettlements: (params?: {
+    storeCode?: string;
+    periodStart?: string;
+    periodEnd?: string;
+    includeHistory?: boolean;
+  }) => request<ConfirmedSettlementBill[]>({
+    url: '/api/reconciliation/confirmed-settlements',
+    method: 'GET',
+    params,
+  }),
+  confirmedSettlement: (id: string) =>
+    request<ConfirmedSettlementDetail>({
+      url: `/api/reconciliation/confirmed-settlements/${id}`,
+      method: 'GET',
+    }),
   extractVisionBill: (fileName: string, pages: File[]) => {
     const formData = new FormData();
     formData.append('fileName', fileName);

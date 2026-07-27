@@ -21,14 +21,17 @@ import type {
   OcrFieldEvidence,
   OcrKeyFieldKey,
   OcrPageResult,
+  ConfirmedSettlementDetail,
 } from '@shared/reconciliation';
 import { reconciliationApi } from '@/api';
 import { renderPdfPagesForVision, renderPdfTilesForVision } from '@/lib/workbook';
+import { confirmedMetadataTargets, persistSettlementConfirmation } from '@/lib/settlement-confirmation';
 import { collectVisionRefinementCandidates, indexVisionRefinements } from '@shared/vision-refinement';
 
 type MappingTarget =
   | ''
   | 'mallName'
+  | 'storeName'
   | 'brandName'
   | 'brandMerchantName'
   | 'storeCode'
@@ -70,6 +73,7 @@ type ReviewRow = {
 const targets: Array<[MappingTarget, string]> = [
   ['', '暂不映射'],
   ['mallName', '商场名称'],
+  ['storeName', '门店名称'],
   ['brandName', '品牌 / 门店'],
   ['brandMerchantName', '品牌商 / 供货单位'],
   ['storeCode', '柜号 / 门店编码'],
@@ -198,20 +202,20 @@ function buildReviewRows(result: VisionExtractionResult): ReviewRow[] {
   const periodSource = result.periodEvidence.rawText;
   const periodIsExplicit = result.periodEvidence.kind === 'explicit_range';
   const metadataRows = [
-    metadataRow('商场名称', result.metadata.mallName, 'mallName', 'AI 从单据页眉识别'),
-    metadataRow('品牌 / 门店', result.metadata.storeName, 'brandName', 'AI 从单据页眉识别'),
-    metadataRow('柜号 / 门店编码', result.metadata.storeCode, 'storeCode', 'AI 从单据页眉识别'),
+    metadataRow('商场名称', result.metadata.mallName, confirmedMetadataTargets.mallName, 'AI 从单据页眉识别'),
+    metadataRow('品牌 / 门店', result.metadata.storeName, confirmedMetadataTargets.storeName, 'AI 从单据页眉识别'),
+    metadataRow('柜号 / 门店编码', result.metadata.storeCode, confirmedMetadataTargets.storeCode, 'AI 从单据页眉识别'),
     metadataRow(
       periodSource || '未返回账期原文',
       result.metadata.periodStart,
-      'periodStart',
+      confirmedMetadataTargets.periodStart,
       periodIsExplicit ? `第 ${result.periodEvidence.page ?? '-'} 页 · 原文日期范围` : 'PDF 未显示 5 月 1 日；系统按结算月份推导当月首日',
       !periodIsExplicit,
     ),
     metadataRow(
       periodSource || '未返回账期原文',
       result.metadata.periodEnd,
-      'periodEnd',
+      confirmedMetadataTargets.periodEnd,
       periodIsExplicit ? `第 ${result.periodEvidence.page ?? '-'} 页 · 原文日期范围` : '系统按结算月份推导当月末日，并与结算日期交叉核对',
       !periodIsExplicit,
     ),
@@ -264,9 +268,11 @@ export default function BillRecognitionPage() {
   const [ocrResult, setOcrResult] = useState<OcrExtractionResult | null>(null);
   const [pageImages, setPageImages] = useState<string[]>([]);
   const [selectedEvidence, setSelectedEvidence] = useState<OcrFieldEvidence | null>(null);
-  const [confirmed, setConfirmed] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmedDetail, setConfirmedDetail] = useState<ConfirmedSettlementDetail | null>(null);
   const [recognitionStage, setRecognitionStage] = useState('等待上传');
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const confirmed = confirmedDetail !== null;
 
   const mapped = useMemo(
     () => Object.fromEntries(rows.filter((row) => row.target).map((row) => [row.target, row.value])),
@@ -289,7 +295,7 @@ export default function BillRecognitionPage() {
     setRefinements({});
     setOcrResult(null);
     pageImages.forEach((url) => URL.revokeObjectURL(url));
-    setConfirmed(false);
+    setConfirmedDetail(null);
     try {
       setRecognitionStage('正在渲染单据页面');
       const pages = await renderPdfPagesForVision(file);
@@ -352,10 +358,34 @@ export default function BillRecognitionPage() {
 
   const saveReview = () => {
     if (!result || !fileName) return;
-    const record = { fileName, result, rows, ocrResult, confirmed, savedAt: new Date().toISOString() };
-    localStorage.setItem(`reconciliation-review:${fileName}`, JSON.stringify(record));
+    const record = { draftType: 'local-review-draft', fileName, result, rows, ocrResult, savedAt: new Date().toISOString() };
+    localStorage.setItem(`reconciliation-local-draft:${fileName}`, JSON.stringify(record));
     setSavedAt(record.savedAt);
-    toast.success('复核结果已保存在当前浏览器。');
+    toast.success('本机草稿已保存，仅用于继续复核，不代表结算单已确认。');
+  };
+
+  const confirmSettlement = async () => {
+    if (!result || !fileName || confirming) return;
+    setConfirming(true);
+    try {
+      const input = {
+        fileName,
+        extraction: result,
+        reviewedFields: rows.map(({ id, source, target, value }) => ({
+          id,
+          label: source,
+          target,
+          value,
+        })),
+        ocrVerified: Boolean(ocrResult) && !ocrBlocksConfirmation,
+      };
+      const detail = await persistSettlementConfirmation(input, reconciliationApi.confirmSettlement, setConfirmedDetail);
+      toast.success(`结算单已确认，版本 V${detail.bill.version}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '确认结算单失败');
+    } finally {
+      setConfirming(false);
+    }
   };
 
   const exportReview = () => {
@@ -436,10 +466,10 @@ export default function BillRecognitionPage() {
               <strong>{needsReview ? '存在推导值或待复核项' : '识别结果可确认'}</strong>
               <p>{result.warnings[0] ?? '请核对原单后确认；确认结果将作为后续 ERP 对账依据。'}</p>
             </div>
-            <button className="button primary" disabled={refining || ocrBlocksConfirmation} onClick={() => { setConfirmed(true); saveReview(); toast.success('结算单已确认，等待 ERP 数据对账。'); }}><Check size={16} />确认结算单</button>
-            <button className="button secondary" type="button" onClick={saveReview}>保存复核结果</button>
+            <button className="button primary" disabled={confirming || refining || ocrBlocksConfirmation} onClick={confirmSettlement}>{confirming ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{confirming ? '正在确认' : '确认结算单'}</button>
+            <button className="button secondary" type="button" disabled={confirming} onClick={saveReview}>保存本机草稿</button>
             <button className="button secondary" type="button" onClick={exportReview}>导出 JSON</button>
-            {savedAt && <small>已保存：{new Date(savedAt).toLocaleString()}</small>}
+            {savedAt && <small>本机草稿：{new Date(savedAt).toLocaleString()}</small>}
           </section>
         </>
       )}
@@ -448,6 +478,10 @@ export default function BillRecognitionPage() {
         <section className="confirmed-result">
           <div className="confirmed-heading"><BadgeCheck size={23} /><div><h3>结算单已确认</h3><p>{fileName} 已完成结构化复核，等待同账期 ERP 数据。</p></div><span className="waiting-badge">待 ERP 对账</span></div>
           <div className="confirmed-grid">
+            <div><span>数据库记录 ID</span><strong>{confirmedDetail.bill.id}</strong></div>
+            <div><span>确认版本</span><strong>V{confirmedDetail.bill.version}</strong></div>
+            <div><span>确认人</span><strong>{confirmedDetail.bill.confirmedBy}</strong></div>
+            <div><span>确认时间</span><strong>{new Date(confirmedDetail.bill.confirmedAt).toLocaleString()}</strong></div>
             {Object.entries(mapped).map(([target, value]) => <div key={target}><span>{targets.find(([key]) => key === target)?.[1]}</span><strong>{value}</strong></div>)}
           </div>
         </section>
