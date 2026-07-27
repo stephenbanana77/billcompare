@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   integer,
   jsonb,
   numeric,
@@ -10,13 +11,126 @@ import {
   uuid,
   varchar,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import type {
+  ConfirmedFieldValue,
   FieldMapping,
   MailAttachment,
   MoneySnapshot,
   RuleSnapshot,
+  VisionExtractionResult,
+  VisionLineItem,
   VoucherLine,
 } from '@shared/reconciliation';
+
+export const reconciliationConfirmedBills = pgTable(
+  'reconciliation_confirmed_bills',
+  {
+    id: uuid('id').primaryKey(),
+    version: integer('version').notNull(),
+    status: varchar('status', { length: 24 }).notNull(),
+    sourceFileName: varchar('source_file_name', { length: 255 }).notNull(),
+    mallName: varchar('mall_name', { length: 120 }).notNull(),
+    storeName: varchar('store_name', { length: 120 }).notNull(),
+    storeCode: varchar('store_code', { length: 60 }).notNull(),
+    periodStart: varchar('period_start', { length: 10 }).notNull(),
+    periodEnd: varchar('period_end', { length: 10 }).notNull(),
+    billType: varchar('bill_type', { length: 40 }).notNull(),
+    settlementNo: varchar('settlement_no', { length: 120 }),
+    salesAmount: numeric('sales_amount', { precision: 16, scale: 2 }).notNull(),
+    invoiceAmount: numeric('invoice_amount', { precision: 16, scale: 2 }),
+    deductionTotal: numeric('deduction_total', { precision: 16, scale: 2 }),
+    settlementAmount: numeric('settlement_amount', {
+      precision: 16,
+      scale: 2,
+    }).notNull(),
+    ocrVerified: boolean('ocr_verified').notNull().default(false),
+    reviewedFields: jsonb('reviewed_fields')
+      .$type<ConfirmedFieldValue[]>()
+      .notNull(),
+    extractionPayload: jsonb('extraction_payload')
+      .$type<VisionExtractionResult>()
+      .notNull(),
+    confirmedBy: varchar('confirmed_by', { length: 120 }).notNull(),
+    confirmedAt: timestamp('confirmed_at', {
+      withTimezone: true,
+      mode: 'string',
+    }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_reconciliation_confirmed_bills_version').on(
+      table.storeCode,
+      table.periodStart,
+      table.periodEnd,
+      table.version,
+    ),
+    uniqueIndex('uq_reconciliation_confirmed_bills_active')
+      .on(table.storeCode, table.periodStart, table.periodEnd)
+      .where(sql`${table.status} = 'confirmed'`),
+    index('idx_reconciliation_confirmed_bills_query').on(
+      table.storeCode,
+      table.periodStart,
+      table.periodEnd,
+      table.status,
+    ),
+  ],
+);
+
+export const reconciliationConfirmedSalesLines = pgTable(
+  'reconciliation_confirmed_sales_lines',
+  {
+    id: uuid('id').primaryKey(),
+    billId: uuid('bill_id')
+      .notNull()
+      .references(() => reconciliationConfirmedBills.id, {
+        onDelete: 'cascade',
+      }),
+    sequence: integer('sequence').notNull(),
+    label: varchar('label', { length: 255 }).notNull(),
+    rowType: varchar('row_type', { length: 24 }).notNull(),
+    values: jsonb('values').$type<VisionLineItem['values']>().notNull(),
+    rawText: text('raw_text'),
+    sourcePage: integer('source_page'),
+    confidence: numeric('confidence', { precision: 5, scale: 4 }),
+  },
+  (table) => [
+    index('idx_reconciliation_confirmed_sales_lines_bill_sequence').on(
+      table.billId,
+      table.sequence,
+    ),
+  ],
+);
+
+export const reconciliationConfirmedFeeLines = pgTable(
+  'reconciliation_confirmed_fee_lines',
+  {
+    id: uuid('id').primaryKey(),
+    billId: uuid('bill_id')
+      .notNull()
+      .references(() => reconciliationConfirmedBills.id, {
+        onDelete: 'cascade',
+      }),
+    sequence: integer('sequence').notNull(),
+    label: varchar('label', { length: 255 }).notNull(),
+    rowType: varchar('row_type', { length: 24 }).notNull(),
+    values: jsonb('values').$type<VisionLineItem['values']>().notNull(),
+    rawText: text('raw_text'),
+    sourcePage: integer('source_page'),
+    confidence: numeric('confidence', { precision: 5, scale: 4 }),
+  },
+  (table) => [
+    index('idx_reconciliation_confirmed_fee_lines_bill_sequence').on(
+      table.billId,
+      table.sequence,
+    ),
+  ],
+);
 
 export const reconciliationEmailSources = pgTable('reconciliation_email_sources', {
   id: uuid('id').primaryKey(),
