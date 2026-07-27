@@ -150,6 +150,18 @@ const createInput = (): ConfirmSettlementBillInput => {
   };
 };
 
+const setReviewedValue = (
+  input: ConfirmSettlementBillInput,
+  target: string,
+  value: string | number | null,
+) => {
+  const field = input.reviewedFields.find(
+    (candidate) => candidate.target === target,
+  );
+  if (!field) throw new Error(`missing test fixture target: ${target}`);
+  field.value = value;
+};
+
 describe('mapConfirmedSettlement', () => {
   it('maps reviewed canonical dimensions and money values into the bill', () => {
     const input = createInput();
@@ -259,5 +271,100 @@ describe('mapConfirmedSettlement', () => {
       '管理费-0201',
       '推广费-0202',
     ]);
+  });
+
+  it.each([
+    ['salesAmount', ','],
+    ['settlementAmount', ','],
+  ])('rejects malformed required money for %s', (target, amount) => {
+    const input = createInput();
+    setReviewedValue(input, target, amount);
+
+    expect(() => mapConfirmedSettlement(input)).toThrow(target);
+  });
+
+  it.each(['1,2', '1e3', '0x10', 'NaN', 'Infinity', '1.234'])(
+    'rejects invalid money syntax %s',
+    (amount) => {
+      const input = createInput();
+      setReviewedValue(input, 'salesAmount', amount);
+
+      expect(() => mapConfirmedSettlement(input)).toThrow('salesAmount');
+    },
+  );
+
+  it('preserves the numeric(16,2) boundary and rejects overflow', () => {
+    const boundaryInput = createInput();
+    setReviewedValue(boundaryInput, 'salesAmount', '99,999,999,999,999.99');
+
+    expect(mapConfirmedSettlement(boundaryInput).bill.salesAmount).toBe(
+      '99999999999999.99',
+    );
+
+    const overflowInput = createInput();
+    setReviewedValue(overflowInput, 'salesAmount', '100,000,000,000,000.00');
+
+    expect(() => mapConfirmedSettlement(overflowInput)).toThrow('salesAmount');
+  });
+
+  it('rejects malformed optional money', () => {
+    const input = createInput();
+    setReviewedValue(input, 'invoiceAmount', '1,2');
+
+    expect(() => mapConfirmedSettlement(input)).toThrow('invoiceAmount');
+  });
+
+  it.each([1.005, Number.NaN, Number.POSITIVE_INFINITY, 100_000_000_000_000])(
+    'rejects unsafe number money input %s',
+    (amount) => {
+      const input = createInput();
+      setReviewedValue(input, 'salesAmount', amount);
+
+      expect(() => mapConfirmedSettlement(input)).toThrow('salesAmount');
+    },
+  );
+
+  it.each([
+    ['periodStart', '2026-02-30'],
+    ['periodEnd', '2026-13-01'],
+    ['periodStart', '2026-2-01'],
+  ])('rejects invalid calendar date for %s', (target, date) => {
+    const input = createInput();
+    setReviewedValue(input, target, date);
+
+    expect(() => mapConfirmedSettlement(input)).toThrow(target);
+  });
+
+  it('rejects a reversed settlement period', () => {
+    const input = createInput();
+    setReviewedValue(input, 'periodStart', '2026-06-01');
+    setReviewedValue(input, 'periodEnd', '2026-05-31');
+
+    expect(() => mapConfirmedSettlement(input)).toThrow('periodStart');
+  });
+
+  it('detaches returned audit data from later input mutations', () => {
+    const input = createInput();
+    const mapped = mapConfirmedSettlement(input);
+
+    input.reviewedFields[0].label = '已修改商场名称';
+    input.extraction.metadata.mallName = '已修改商场';
+    input.extraction.lineItems[0].label = '已修改销售行';
+    input.extraction.lineItems[1].label = '已修改费用行';
+    input.extraction.lineItems.push({
+      section: '扣款费用明细',
+      label: '新增费用',
+      values: { 金额: 1 },
+      rawText: null,
+      page: 1,
+      confidence: 1,
+    });
+
+    expect(mapped.bill.reviewedFields[0].label).toBe('商场名称');
+    expect(mapped.bill.extractionPayload.metadata.mallName).toBe(
+      '上海久光中心',
+    );
+    expect(mapped.salesLines[0].label).toBe('本期销售');
+    expect(mapped.feeLines.map((line) => line.label)).toEqual(['扣款合计']);
   });
 });

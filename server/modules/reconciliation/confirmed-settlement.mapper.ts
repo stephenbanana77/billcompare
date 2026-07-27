@@ -17,16 +17,86 @@ const requiredTargets = [
 
 const text = (value: unknown): string => String(value ?? '').trim();
 
-const money = (value: unknown, target: string): string | null => {
-  const normalized = text(value).replace(/[,\s]/g, '');
-  if (!normalized) return null;
+const invalidMoney = (target: string): never => {
+  throw new BadRequestException(
+    `${target} must be a valid numeric(16,2) amount`,
+  );
+};
 
-  const parsed = Number(normalized);
-  if (!Number.isFinite(parsed)) {
-    throw new BadRequestException(`${target} must be numeric`);
+const money = (value: unknown, target: string): string | null => {
+  if (value === null || value === undefined || text(value) === '') return null;
+
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || !Number.isSafeInteger(value * 100)) {
+      return invalidMoney(target);
+    }
+
+    const formatted = value.toFixed(2);
+    const integerDigits = formatted.replace(/^-/, '').split('.')[0].length;
+    if (integerDigits > 14) return invalidMoney(target);
+    return formatted;
   }
 
-  return parsed.toFixed(2);
+  const match = text(value).match(
+    /^(-?)(?:(\d+)|(\d{1,3}(?:,\d{3})+))(?:\.(\d{1,2}))?$/,
+  );
+  if (!match) return invalidMoney(target);
+
+  const sign = match[1];
+  const integer = (match[2] ?? match[3])
+    .replace(/,/g, '')
+    .replace(/^0+(?=\d)/, '');
+  const fraction = (match[4] ?? '').padEnd(2, '0');
+  if (integer.length > 14) return invalidMoney(target);
+
+  return `${sign}${integer}.${fraction}`;
+};
+
+const requiredMoney = (value: unknown, target: string): string => {
+  const normalized = money(value, target);
+  if (normalized === null) {
+    throw new BadRequestException(`${target} is required`);
+  }
+  return normalized;
+};
+
+const calendarDate = (value: unknown, target: string): string => {
+  const normalized = text(value);
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    throw new BadRequestException(`${target} must be a valid YYYY-MM-DD date`);
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+
+  if (
+    year === 0 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth[month - 1]
+  ) {
+    throw new BadRequestException(`${target} must be a valid YYYY-MM-DD date`);
+  }
+
+  return normalized;
 };
 
 const indexReviewedFields = (fields: ConfirmedFieldValue[]) => {
@@ -63,6 +133,14 @@ export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
 
   const reviewed = indexReviewedFields(input.reviewedFields);
   const value = (target: string) => reviewed.get(target)?.value;
+  const periodStart = calendarDate(value('periodStart'), 'periodStart');
+  const periodEnd = calendarDate(value('periodEnd'), 'periodEnd');
+  if (periodStart > periodEnd) {
+    throw new BadRequestException('periodStart must not be after periodEnd');
+  }
+
+  const reviewedFields = structuredClone(input.reviewedFields);
+  const extractionPayload = structuredClone(input.extraction);
 
   return {
     bill: {
@@ -70,19 +148,22 @@ export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
       mallName: text(value('mallName')),
       storeName: text(value('storeName')),
       storeCode: text(value('storeCode')),
-      periodStart: text(value('periodStart')),
-      periodEnd: text(value('periodEnd')),
+      periodStart,
+      periodEnd,
       billType: input.extraction.metadata.billType,
       settlementNo: text(value('settlementNo')) || null,
-      salesAmount: money(value('salesAmount'), 'salesAmount')!,
+      salesAmount: requiredMoney(value('salesAmount'), 'salesAmount'),
       invoiceAmount: money(value('invoiceAmount'), 'invoiceAmount'),
       deductionTotal: money(value('deductionTotal'), 'deductionTotal'),
-      settlementAmount: money(value('settlementAmount'), 'settlementAmount')!,
+      settlementAmount: requiredMoney(
+        value('settlementAmount'),
+        'settlementAmount',
+      ),
       ocrVerified: Boolean(input.ocrVerified),
-      reviewedFields: input.reviewedFields,
-      extractionPayload: input.extraction,
+      reviewedFields,
+      extractionPayload,
     },
-    salesLines: input.extraction.lineItems.filter(isSalesLine),
-    feeLines: input.extraction.lineItems.filter(isFeeLine),
+    salesLines: extractionPayload.lineItems.filter(isSalesLine),
+    feeLines: extractionPayload.lineItems.filter(isFeeLine),
   };
 };
