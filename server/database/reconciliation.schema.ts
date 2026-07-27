@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -15,6 +16,7 @@ import {
 import { sql } from 'drizzle-orm';
 import type {
   ConfirmedFieldValue,
+  ConfirmedSettlementStatus,
   FieldMapping,
   MailAttachment,
   MoneySnapshot,
@@ -29,7 +31,9 @@ export const reconciliationConfirmedBills = pgTable(
   {
     id: uuid('id').primaryKey(),
     version: integer('version').notNull(),
-    status: varchar('status', { length: 24 }).notNull(),
+    status: varchar('status', { length: 24 })
+      .$type<ConfirmedSettlementStatus>()
+      .notNull(),
     sourceFileName: varchar('source_file_name', { length: 255 }).notNull(),
     mallName: varchar('mall_name', { length: 120 }).notNull(),
     storeName: varchar('store_name', { length: 120 }).notNull(),
@@ -65,20 +69,39 @@ export const reconciliationConfirmedBills = pgTable(
       .notNull(),
   },
   (table) => [
+    check(
+      'ck_reconciliation_confirmed_bills_status',
+      sql`${table.status} IN ('confirmed', 'superseded', 'revoked')`,
+    ),
     unique('uq_reconciliation_confirmed_bills_version').on(
+      table.mallName,
       table.storeCode,
       table.periodStart,
       table.periodEnd,
+      table.billType,
       table.version,
     ),
     uniqueIndex('uq_confirmed_bill_active_period')
-      .on(table.storeCode, table.periodStart, table.periodEnd)
+      .on(
+        table.mallName,
+        table.storeCode,
+        table.periodStart,
+        table.periodEnd,
+        table.billType,
+      )
       .where(sql`${table.status} = 'confirmed'`),
     index('idx_confirmed_bill_query').on(
+      table.mallName,
       table.storeCode,
       table.periodStart,
       table.periodEnd,
       table.status,
+      table.billType,
+    ),
+    index('idx_confirmed_bill_status_period').on(
+      table.status,
+      table.periodStart,
+      table.periodEnd,
     ),
   ],
 );
@@ -101,6 +124,10 @@ export const reconciliationConfirmedSalesLines = pgTable(
     confidence: numeric('confidence', { precision: 5, scale: 4 }),
   },
   (table) => [
+    unique('uq_confirmed_sales_bill_sequence').on(
+      table.billId,
+      table.sequence,
+    ),
     index('idx_confirmed_sales_bill').on(
       table.billId,
       table.sequence,
@@ -126,6 +153,10 @@ export const reconciliationConfirmedFeeLines = pgTable(
     confidence: numeric('confidence', { precision: 5, scale: 4 }),
   },
   (table) => [
+    unique('uq_confirmed_fee_bill_sequence').on(
+      table.billId,
+      table.sequence,
+    ),
     index('idx_confirmed_fee_bill').on(
       table.billId,
       table.sequence,

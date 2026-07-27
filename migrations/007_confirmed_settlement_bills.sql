@@ -23,16 +23,21 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_bills (
   confirmed_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT ck_reconciliation_confirmed_bills_status
+    CHECK (status IN ('confirmed', 'superseded', 'revoked')),
   CONSTRAINT uq_reconciliation_confirmed_bills_version
-    UNIQUE (store_code, period_start, period_end, version)
+    UNIQUE (mall_name, store_code, period_start, period_end, bill_type, version)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_bill_active_period
-  ON reconciliation_confirmed_bills(store_code, period_start, period_end)
+  ON reconciliation_confirmed_bills(mall_name, store_code, period_start, period_end, bill_type)
   WHERE status = 'confirmed';
 
 CREATE INDEX IF NOT EXISTS idx_confirmed_bill_query
-  ON reconciliation_confirmed_bills(store_code, period_start, period_end, status);
+  ON reconciliation_confirmed_bills(mall_name, store_code, period_start, period_end, status, bill_type);
+
+CREATE INDEX IF NOT EXISTS idx_confirmed_bill_status_period
+  ON reconciliation_confirmed_bills(status, period_start, period_end);
 
 CREATE TABLE IF NOT EXISTS reconciliation_confirmed_sales_lines (
   id uuid PRIMARY KEY,
@@ -43,7 +48,8 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_sales_lines (
   "values" jsonb NOT NULL,
   raw_text text,
   source_page integer,
-  confidence numeric(5,4)
+  confidence numeric(5,4),
+  CONSTRAINT uq_confirmed_sales_bill_sequence UNIQUE (bill_id, sequence)
 );
 
 CREATE INDEX IF NOT EXISTS idx_confirmed_sales_bill
@@ -58,7 +64,8 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_fee_lines (
   "values" jsonb NOT NULL,
   raw_text text,
   source_page integer,
-  confidence numeric(5,4)
+  confidence numeric(5,4),
+  CONSTRAINT uq_confirmed_fee_bill_sequence UNIQUE (bill_id, sequence)
 );
 
 CREATE INDEX IF NOT EXISTS idx_confirmed_fee_bill
