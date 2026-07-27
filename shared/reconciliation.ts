@@ -338,3 +338,50 @@ export interface IngestInboundEmailInput {
     sizeBytes?: number;
   }>;
 }
+
+export interface ConfirmedFieldValue {
+  id: string;
+  label: string;
+  target: string;
+  value: string | number | null;
+}
+
+export interface ConfirmSettlementBillInput {
+  fileName: string;
+  extraction: VisionExtractionResult;
+  reviewedFields: ConfirmedFieldValue[];
+  ocrVerified: boolean;
+}
+
+export type ConfirmedSettlementStatus = 'confirmed' | 'superseded' | 'revoked';
+
+export interface ConfirmedSettlementBill {
+  id: string;
+  version: number;
+  status: ConfirmedSettlementStatus;
+  sourceFileName: string;
+  mallName: string;
+  storeName: string;
+  storeCode: string;
+  periodStart: string;
+  periodEnd: string;
+  billType: VisionExtractionResult['metadata']['billType'];
+  settlementNo: string | null;
+  salesAmount: string;
+  invoiceAmount: string;
+  deductionTotal: string;
+  settlementAmount: string;
+  ocrVerified: boolean;
+  confirmedBy: string;
+  confirmedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConfirmedSettlementDetail {
+  bill: ConfirmedSettlementBill;
+  reviewedFields: ConfirmedFieldValue[];
+  extraction: VisionExtractionResult;
+  salesLines: VisionLineItem[];
+  feeLines: VisionLineItem[];
+}
