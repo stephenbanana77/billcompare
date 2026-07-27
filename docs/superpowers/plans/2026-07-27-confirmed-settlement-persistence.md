@@ -714,6 +714,13 @@ Expected: exactly three rows.
 
 - [ ] **Step 2: Run the complete automated verification suite**
 
+The repository has no dedicated PostgreSQL test database configuration. Task 4
+therefore verifies transaction boundaries with a controlled database double.
+In this step, add or run real PostgreSQL integration checks proving that
+concurrent confirmations for the same full logical identity allocate sequential
+versions, and that a forced detail-line insert failure rolls back both the bill
+insert and any active-version supersede update.
+
 ```powershell
 npm test -- --runInBand
 npm run type:check

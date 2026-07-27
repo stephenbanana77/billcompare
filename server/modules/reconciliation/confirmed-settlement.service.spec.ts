@@ -109,15 +109,32 @@ class DatabaseDouble {
   readonly selectOrders: unknown[][] = [];
   readonly selectLimits: number[] = [];
   existingActive: Pick<BillRow, 'id' | 'version'> | undefined;
+  highestHistorical: Pick<BillRow, 'id' | 'version'> | undefined;
+  failOn: 'bill:insert' | 'sales:insert' | 'fee:insert' | undefined;
   bills: BillRow[] = [];
   salesRows: Array<typeof reconciliationConfirmedSalesLines.$inferSelect> = [];
   feeRows: Array<typeof reconciliationConfirmedFeeLines.$inferSelect> = [];
   transaction = jest.fn(
     async (callback: (tx: DatabaseDouble) => Promise<string>) => {
+      const snapshot = {
+        bills: this.billInserts.length,
+        sales: this.salesInserts.length,
+        fees: this.feeInserts.length,
+        updates: this.updates.length,
+      };
       this.events.push('transaction:start');
-      const result = await callback(this);
-      this.events.push('transaction:commit');
-      return result;
+      try {
+        const result = await callback(this);
+        this.events.push('transaction:commit');
+        return result;
+      } catch (error) {
+        this.billInserts.splice(snapshot.bills);
+        this.salesInserts.splice(snapshot.sales);
+        this.feeInserts.splice(snapshot.fees);
+        this.updates.splice(snapshot.updates);
+        this.events.push('transaction:rollback');
+        throw error;
+      }
     },
   );
 
@@ -192,6 +209,8 @@ class DatabaseDouble {
           this.feeInserts.push(...rows);
           this.events.push('fee:insert');
         }
+        const event = this.events.at(-1);
+        if (event === this.failOn) throw new Error(`forced ${event} failure`);
         return builder;
       },
       returning: () => Promise.resolve([{ id: this.billInserts.at(-1)?.id }]),
@@ -210,6 +229,7 @@ class DatabaseDouble {
         if (this.existingActive) return [this.existingActive];
         return this.bills.filter((bill) => bill.status === 'confirmed');
       }
+      if (where && this.highestHistorical) return [this.highestHistorical];
       return this.bills;
     }
     if (table === reconciliationConfirmedSalesLines) return this.salesRows;
@@ -395,6 +415,7 @@ describe('ConfirmedSettlementService', () => {
   it('locks the full logical identity and supersedes V1 before inserting V2', async () => {
     const db = new DatabaseDouble();
     db.existingActive = { id: 'old-id', version: 1 };
+    db.highestHistorical = { id: 'old-id', version: 1 };
     const service = createService(db);
 
     const created = await service.confirm(input());
@@ -422,6 +443,71 @@ describe('ConfirmedSettlementService', () => {
     );
     expect(db.billInserts[0].version).toBe(2);
     expect(created.bill.version).toBe(2);
+  });
+
+  it('allocates from the highest historical version when no confirmed row is active', async () => {
+    const db = new DatabaseDouble();
+    db.highestHistorical = { id: 'revoked-id', version: 3 };
+    const service = createService(db);
+
+    const created = await service.confirm(input());
+
+    const historyQuery = db.selectWheres
+      .map(sqlQuery)
+      .find((query) => !query.params.includes('confirmed'));
+    expect(historyQuery?.params).toEqual(
+      expect.arrayContaining([
+        'Mall A',
+        'SHAD64',
+        '2026-05-01',
+        '2026-05-31',
+        'standard',
+      ]),
+    );
+    expect(sqlQuery(db.selectOrders[0][0] as SQL).sql).toContain('desc');
+    expect(db.selectLimits).toContain(1);
+    expect(db.updates).toHaveLength(0);
+    expect(db.billInserts[0].version).toBe(4);
+    expect(created.bill.version).toBe(4);
+  });
+
+  it('captures the confirmation time only after the advisory lock is acquired', async () => {
+    const db = new DatabaseDouble();
+    const service = createService(db);
+    const originalToISOString = Date.prototype.toISOString;
+    const clock = jest
+      .spyOn(Date.prototype, 'toISOString')
+      .mockImplementation(function (this: Date) {
+        expect(db.events).toContain('lock');
+        return originalToISOString.call(this);
+      });
+
+    try {
+      await service.confirm(input());
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  // This double verifies the service's transaction boundary. Real PostgreSQL
+  // lock contention and rollback behavior are exercised after migration in Task 7.
+  it('rolls back superseding and all inserts when a detail write fails', async () => {
+    const db = new DatabaseDouble();
+    db.existingActive = { id: 'old-id', version: 1 };
+    db.highestHistorical = { id: 'old-id', version: 1 };
+    db.failOn = 'fee:insert';
+    const service = new ConfirmedSettlementService(db as never);
+
+    await expect(service.confirm(input())).rejects.toThrow(
+      'forced fee:insert failure',
+    );
+
+    expect(db.events).toContain('transaction:rollback');
+    expect(db.events).not.toContain('transaction:commit');
+    expect(db.updates).toHaveLength(0);
+    expect(db.billInserts).toHaveLength(0);
+    expect(db.salesInserts).toHaveLength(0);
+    expect(db.feeInserts).toHaveLength(0);
   });
 
   it('uses the configured demo operator and normalizes duplicate model sequences', async () => {

@@ -48,12 +48,29 @@ export class ConfirmedSettlementService {
       mapped.bill.billType,
     ];
     const identityKey = JSON.stringify(identity);
-    const confirmedAt = new Date().toISOString();
 
     const id = await this.db.transaction(async (tx) => {
       await tx.execute(
         sql`select pg_advisory_xact_lock(hashtext(${identityKey}))`,
       );
+      const confirmedAt = new Date().toISOString();
+      const identityConditions = [
+        eq(reconciliationConfirmedBills.mallName, mapped.bill.mallName),
+        eq(reconciliationConfirmedBills.storeCode, mapped.bill.storeCode),
+        eq(reconciliationConfirmedBills.periodStart, mapped.bill.periodStart),
+        eq(reconciliationConfirmedBills.periodEnd, mapped.bill.periodEnd),
+        eq(reconciliationConfirmedBills.billType, mapped.bill.billType),
+      ];
+
+      const [latest] = await tx
+        .select({
+          id: reconciliationConfirmedBills.id,
+          version: reconciliationConfirmedBills.version,
+        })
+        .from(reconciliationConfirmedBills)
+        .where(and(...identityConditions))
+        .orderBy(desc(reconciliationConfirmedBills.version))
+        .limit(1);
 
       const [current] = await tx
         .select({
@@ -63,14 +80,7 @@ export class ConfirmedSettlementService {
         .from(reconciliationConfirmedBills)
         .where(
           and(
-            eq(reconciliationConfirmedBills.mallName, mapped.bill.mallName),
-            eq(reconciliationConfirmedBills.storeCode, mapped.bill.storeCode),
-            eq(
-              reconciliationConfirmedBills.periodStart,
-              mapped.bill.periodStart,
-            ),
-            eq(reconciliationConfirmedBills.periodEnd, mapped.bill.periodEnd),
-            eq(reconciliationConfirmedBills.billType, mapped.bill.billType),
+            ...identityConditions,
             eq(reconciliationConfirmedBills.status, 'confirmed'),
           ),
         );
@@ -85,7 +95,7 @@ export class ConfirmedSettlementService {
       const billId = randomUUID();
       await tx.insert(reconciliationConfirmedBills).values({
         id: billId,
-        version: (current?.version ?? 0) + 1,
+        version: (latest?.version ?? 0) + 1,
         status: 'confirmed',
         ...mapped.bill,
         confirmedBy: process.env.DEMO_OPERATOR_NAME ?? 'Demo Operator',
