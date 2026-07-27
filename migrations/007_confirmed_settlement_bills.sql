@@ -27,11 +27,11 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_bills (
     UNIQUE (store_code, period_start, period_end, version)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_reconciliation_confirmed_bills_active
+CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_bill_active_period
   ON reconciliation_confirmed_bills(store_code, period_start, period_end)
   WHERE status = 'confirmed';
 
-CREATE INDEX IF NOT EXISTS idx_reconciliation_confirmed_bills_query
+CREATE INDEX IF NOT EXISTS idx_confirmed_bill_query
   ON reconciliation_confirmed_bills(store_code, period_start, period_end, status);
 
 CREATE TABLE IF NOT EXISTS reconciliation_confirmed_sales_lines (
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_sales_lines (
   confidence numeric(5,4)
 );
 
-CREATE INDEX IF NOT EXISTS idx_reconciliation_confirmed_sales_lines_bill_sequence
+CREATE INDEX IF NOT EXISTS idx_confirmed_sales_bill
   ON reconciliation_confirmed_sales_lines(bill_id, sequence);
 
 CREATE TABLE IF NOT EXISTS reconciliation_confirmed_fee_lines (
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_fee_lines (
   confidence numeric(5,4)
 );
 
-CREATE INDEX IF NOT EXISTS idx_reconciliation_confirmed_fee_lines_bill_sequence
+CREATE INDEX IF NOT EXISTS idx_confirmed_fee_bill
   ON reconciliation_confirmed_fee_lines(bill_id, sequence);
 
 COMMIT;

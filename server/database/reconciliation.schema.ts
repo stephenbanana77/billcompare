@@ -7,6 +7,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   varchar,
@@ -64,16 +65,16 @@ export const reconciliationConfirmedBills = pgTable(
       .notNull(),
   },
   (table) => [
-    uniqueIndex('uq_reconciliation_confirmed_bills_version').on(
+    unique('uq_reconciliation_confirmed_bills_version').on(
       table.storeCode,
       table.periodStart,
       table.periodEnd,
       table.version,
     ),
-    uniqueIndex('uq_reconciliation_confirmed_bills_active')
+    uniqueIndex('uq_confirmed_bill_active_period')
       .on(table.storeCode, table.periodStart, table.periodEnd)
       .where(sql`${table.status} = 'confirmed'`),
-    index('idx_reconciliation_confirmed_bills_query').on(
+    index('idx_confirmed_bill_query').on(
       table.storeCode,
       table.periodStart,
       table.periodEnd,
@@ -100,7 +101,7 @@ export const reconciliationConfirmedSalesLines = pgTable(
     confidence: numeric('confidence', { precision: 5, scale: 4 }),
   },
   (table) => [
-    index('idx_reconciliation_confirmed_sales_lines_bill_sequence').on(
+    index('idx_confirmed_sales_bill').on(
       table.billId,
       table.sequence,
     ),
@@ -125,7 +126,7 @@ export const reconciliationConfirmedFeeLines = pgTable(
     confidence: numeric('confidence', { precision: 5, scale: 4 }),
   },
   (table) => [
-    index('idx_reconciliation_confirmed_fee_lines_bill_sequence').on(
+    index('idx_confirmed_fee_bill').on(
       table.billId,
       table.sequence,
     ),
