@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import {
   DRIZZLE_DATABASE,
   type PostgresJsDatabase,
@@ -30,6 +35,11 @@ type StoredLine =
   | typeof reconciliationConfirmedSalesLines.$inferSelect
   | typeof reconciliationConfirmedFeeLines.$inferSelect;
 
+type BillIdentity = Pick<
+  typeof reconciliationConfirmedBills.$inferSelect,
+  'mallName' | 'storeCode' | 'periodStart' | 'periodEnd' | 'billType'
+>;
+
 @Injectable()
 export class ConfirmedSettlementService {
   constructor(
@@ -51,6 +61,35 @@ export class ConfirmedSettlementService {
 
     const id = await this.db.transaction(async (tx) => {
       await tx.execute(
+        sql`select 1 as locked from pg_advisory_xact_lock(hashtext(${mapped.bill.confirmationKey}))`,
+      );
+      const [existingConfirmation] = await tx
+        .select({
+          id: reconciliationConfirmedBills.id,
+          mallName: reconciliationConfirmedBills.mallName,
+          storeCode: reconciliationConfirmedBills.storeCode,
+          periodStart: reconciliationConfirmedBills.periodStart,
+          periodEnd: reconciliationConfirmedBills.periodEnd,
+          billType: reconciliationConfirmedBills.billType,
+        })
+        .from(reconciliationConfirmedBills)
+        .where(
+          eq(
+            reconciliationConfirmedBills.confirmationKey,
+            mapped.bill.confirmationKey,
+          ),
+        )
+        .limit(1);
+      if (existingConfirmation) {
+        if (!this.hasSameIdentity(existingConfirmation, mapped.bill)) {
+          throw new ConflictException(
+            'confirmationKey already belongs to a different confirmed settlement identity',
+          );
+        }
+        return existingConfirmation.id;
+      }
+
+      await tx.execute(
         sql`select 1 as locked from pg_advisory_xact_lock(hashtext(${identityKey}))`,
       );
       const confirmedAt = new Date().toISOString();
@@ -61,18 +100,6 @@ export class ConfirmedSettlementService {
         eq(reconciliationConfirmedBills.periodEnd, mapped.bill.periodEnd),
         eq(reconciliationConfirmedBills.billType, mapped.bill.billType),
       ];
-
-      const [existingConfirmation] = await tx
-        .select({ id: reconciliationConfirmedBills.id })
-        .from(reconciliationConfirmedBills)
-        .where(
-          eq(
-            reconciliationConfirmedBills.confirmationKey,
-            mapped.bill.confirmationKey,
-          ),
-        )
-        .limit(1);
-      if (existingConfirmation) return existingConfirmation.id;
 
       const [latest] = await tx
         .select({
@@ -227,6 +254,16 @@ export class ConfirmedSettlementService {
       ...bill,
       billType: bill.billType as ConfirmedSettlementBill['billType'],
     };
+  }
+
+  private hasSameIdentity(left: BillIdentity, right: BillIdentity): boolean {
+    return (
+      left.mallName === right.mallName &&
+      left.storeCode === right.storeCode &&
+      left.periodStart === right.periodStart &&
+      left.periodEnd === right.periodEnd &&
+      left.billType === right.billType
+    );
   }
 
   private restoreLines(

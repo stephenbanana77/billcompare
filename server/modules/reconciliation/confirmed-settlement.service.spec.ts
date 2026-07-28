@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ConflictException } from '@nestjs/common';
 import { getTableName, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
@@ -111,7 +112,18 @@ class DatabaseDouble {
   readonly selectLimits: number[] = [];
   existingActive: Pick<BillRow, 'id' | 'version'> | undefined;
   highestHistorical: Pick<BillRow, 'id' | 'version'> | undefined;
-  existingByConfirmationKey: Pick<BillRow, 'id' | 'version'> | undefined;
+  existingByConfirmationKey:
+    | Pick<
+        BillRow,
+        | 'id'
+        | 'version'
+        | 'mallName'
+        | 'storeCode'
+        | 'periodStart'
+        | 'periodEnd'
+        | 'billType'
+      >
+    | undefined;
   failOn: 'bill:insert' | 'sales:insert' | 'fee:insert' | undefined;
   bills: BillRow[] = [];
   salesRows: Array<typeof reconciliationConfirmedSalesLines.$inferSelect> = [];
@@ -439,7 +451,15 @@ describe('ConfirmedSettlementService', () => {
 
   it('returns the existing bill for the same confirmation key without creating a version', async () => {
     const db = new DatabaseDouble();
-    db.existingByConfirmationKey = { id: 'existing-id', version: 1 };
+    db.existingByConfirmationKey = {
+      id: 'existing-id',
+      version: 1,
+      mallName: 'Mall A',
+      storeCode: 'SHAD64',
+      periodStart: '2026-05-01',
+      periodEnd: '2026-05-31',
+      billType: 'standard',
+    };
     const service = new ConfirmedSettlementService(db as never);
     const existing = detailFrom(db);
     existing.bill = { ...existing.bill, id: 'existing-id', version: 1 };
@@ -448,6 +468,29 @@ describe('ConfirmedSettlementService', () => {
     const result = await service.confirm(input());
 
     expect(result.bill).toMatchObject({ id: 'existing-id', version: 1 });
+    expect(db.billInserts).toHaveLength(0);
+    expect(db.updates).toHaveLength(0);
+    expect(db.salesInserts).toHaveLength(0);
+    expect(db.feeInserts).toHaveLength(0);
+  });
+
+  it('rejects a reused confirmation key when the logical bill identity differs', async () => {
+    const db = new DatabaseDouble();
+    db.existingByConfirmationKey = {
+      id: 'existing-id',
+      version: 1,
+      mallName: 'Mall A',
+      storeCode: 'OTHER',
+      periodStart: '2026-05-01',
+      periodEnd: '2026-05-31',
+      billType: 'standard',
+    };
+    const service = new ConfirmedSettlementService(db as never);
+
+    await expect(service.confirm(input())).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+
     expect(db.billInserts).toHaveLength(0);
     expect(db.updates).toHaveLength(0);
     expect(db.salesInserts).toHaveLength(0);
@@ -481,7 +524,7 @@ describe('ConfirmedSettlementService', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  it('locks the full logical identity and supersedes V1 before inserting V2', async () => {
+  it('locks the confirmation key before identity versioning and supersedes V1 before inserting V2', async () => {
     const db = new DatabaseDouble();
     db.existingActive = { id: 'old-id', version: 1 };
     db.highestHistorical = { id: 'old-id', version: 1 };
@@ -496,13 +539,19 @@ describe('ConfirmedSettlementService', () => {
       '2026-05-31',
       'standard',
     ];
-    const lock = sqlQuery(db.executed[0]);
+    const keyLock = sqlQuery(db.executed[0]);
     const activeQuery = db.selectWheres
       .map(sqlQuery)
       .find((query) => query.params.includes('confirmed'));
-    expect(lock.sql).toContain('pg_advisory_xact_lock');
-    expect(lock.sql).toContain('select 1 as locked from');
-    expect(lock.params).toContain(JSON.stringify(identity));
+    expect(keyLock.sql).toContain('pg_advisory_xact_lock');
+    expect(keyLock.sql).toContain('select 1 as locked from');
+    expect(keyLock.params).toContain(input().confirmationKey);
+    expect(
+      db.executed
+        .slice(1)
+        .map(sqlQuery)
+        .some((query) => query.params.includes(JSON.stringify(identity))),
+    ).toBe(true);
     expect(activeQuery?.params).toEqual(
       expect.arrayContaining([...identity, 'confirmed']),
     );

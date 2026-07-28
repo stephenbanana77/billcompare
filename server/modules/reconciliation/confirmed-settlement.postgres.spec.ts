@@ -3,6 +3,7 @@ import path from 'node:path';
 import dotenv from 'dotenv';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
+import { ConflictException } from '@nestjs/common';
 import type { PostgresJsDatabase } from '@lark-apaas/fullstack-nestjs-core';
 import type { ConfirmSettlementBillInput } from '../../../shared/reconciliation';
 import { ConfirmedSettlementService } from './confirmed-settlement.service';
@@ -21,6 +22,13 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
   let client: ReturnType<typeof postgres>;
   let service: ConfirmedSettlementService;
   let connected = false;
+
+  const cleanup = async () => {
+    await client`
+      DELETE FROM reconciliation_confirmed_bills
+      WHERE mall_name = ${mallName}
+    `;
+  };
 
   const createInput = (
     fileName: string,
@@ -122,16 +130,20 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
     service = new ConfirmedSettlementService(
       drizzle(client) as unknown as PostgresJsDatabase,
     );
+    await cleanup();
+  });
+
+  beforeEach(async () => {
+    await cleanup();
+  });
+
+  afterEach(async () => {
+    await cleanup();
   });
 
   afterAll(async () => {
     if (!client) return;
-    if (connected) {
-      await client`
-        DELETE FROM reconciliation_confirmed_bills
-        WHERE mall_name = ${mallName} AND store_code = ${storeCode}
-      `;
-    }
+    if (connected) await cleanup();
     await client.end();
   });
 
@@ -217,5 +229,51 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
       },
       { id: next.bill.id, version: 2, status: 'confirmed' },
     ]);
+  }, 30_000);
+
+  it('serializes a shared confirmation key before identity handling and returns 409 for a different identity', async () => {
+    const sharedKey = randomUUID();
+    const firstStoreCode = `${storeCode}-KEY-A`;
+    const secondStoreCode = `${storeCode}-KEY-B`;
+
+    const results = await Promise.allSettled([
+      service.confirm(
+        createInput('shared-key-a.pdf', 0.99, sharedKey, firstStoreCode),
+      ),
+      service.confirm(
+        createInput('shared-key-b.pdf', 0.99, sharedKey, secondStoreCode),
+      ),
+    ]);
+
+    const fulfilled = results.filter(
+      (
+        result,
+      ): result is PromiseFulfilledResult<
+        Awaited<ReturnType<typeof service.confirm>>
+      > => result.status === 'fulfilled',
+    );
+    const rejected = results.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(ConflictException);
+    expect(rejected[0].reason.getStatus()).toBe(409);
+
+    const persisted = await client`
+      SELECT id, store_code, version, status, confirmation_key
+      FROM reconciliation_confirmed_bills
+      WHERE mall_name = ${mallName}
+        AND confirmation_key = ${sharedKey}
+      ORDER BY store_code
+    `;
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      id: fulfilled[0].value.bill.id,
+      version: 1,
+      status: 'confirmed',
+      confirmation_key: sharedKey,
+    });
   }, 30_000);
 });
