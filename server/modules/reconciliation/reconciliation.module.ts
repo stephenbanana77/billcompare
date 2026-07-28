@@ -4,6 +4,7 @@ import { ReconciliationService } from './reconciliation.service';
 import { VisionExtractionService } from './vision-extraction.service';
 import { PaddleOcrService } from './ocr/paddle-ocr.service';
 import { ConfirmedSettlementService } from './confirmed-settlement.service';
+import { SettlementAnalysisService } from './settlement-analysis.service';
 
 @Module({
   controllers: [ReconciliationController],
@@ -12,6 +13,7 @@ import { ConfirmedSettlementService } from './confirmed-settlement.service';
     VisionExtractionService,
     PaddleOcrService,
     ConfirmedSettlementService,
+    SettlementAnalysisService,
   ],
 })
 export class ReconciliationModule {}

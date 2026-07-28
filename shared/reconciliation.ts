@@ -387,3 +387,70 @@ export interface ConfirmedSettlementDetail {
   salesLines: VisionLineItem[];
   feeLines: VisionLineItem[];
 }
+
+export interface SettlementAnalysisFilters {
+  mallName?: string;
+  storeCode?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  limit?: number;
+}
+
+export type SettlementAnalysisBill = Omit<
+  ConfirmedSettlementBill,
+  'confirmationKey'
+>;
+
+export interface SettlementAnalysisSummary {
+  filters: SettlementAnalysisFilters;
+  billCount: number;
+  periodStart: string | null;
+  periodEnd: string | null;
+  totals: {
+    salesAmount: string;
+    invoiceAmount: string;
+    deductionTotal: string;
+    settlementAmount: string;
+  };
+  bills: SettlementAnalysisBill[];
+  generatedAt: string;
+}
+
+export interface SettlementFeeAnalysisLine {
+  billId: string;
+  periodStart: string;
+  periodEnd: string;
+  mallName: string;
+  storeCode: string;
+  storeName: string;
+  label: string;
+  amount: string;
+  rawText: string | null;
+  page: number | null;
+  confidence: number | null;
+}
+
+export interface SettlementFeeAnalysisItem {
+  label: string;
+  amount: string;
+  billCount: number;
+  lineCount: number;
+  lines: SettlementFeeAnalysisLine[];
+}
+
+export interface SettlementFeeAnalysisResult {
+  filters: SettlementAnalysisFilters;
+  billCount: number;
+  totalFeeAmount: string;
+  items: SettlementFeeAnalysisItem[];
+  generatedAt: string;
+}
+
+export interface SettlementAnalysisDetail {
+  bill: SettlementAnalysisBill;
+  reviewedFields: ConfirmedFieldValue[];
+  metadata: VisionExtractionResult['metadata'];
+  warnings: string[];
+  salesLines: VisionLineItem[];
+  feeLines: VisionLineItem[];
+}

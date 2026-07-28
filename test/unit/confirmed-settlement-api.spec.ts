@@ -117,6 +117,21 @@ describe('confirmed settlement API contract', () => {
       'confirmed-settlements/:id',
       RequestMethod.GET,
     );
+    expectRoute(
+      'summarizeSettlementAnalysis' as keyof ReconciliationController,
+      'analysis/settlements/summary',
+      RequestMethod.GET,
+    );
+    expectRoute(
+      'analyzeSettlementFees' as keyof ReconciliationController,
+      'analysis/settlements/fees',
+      RequestMethod.GET,
+    );
+    expectRoute(
+      'getSettlementAnalysisDetail' as keyof ReconciliationController,
+      'analysis/settlements/:id',
+      RequestMethod.GET,
+    );
   });
 
   it('wires body, query, and path parameters through real Nest metadata', () => {

@@ -30,6 +30,7 @@ import { VisionExtractionService } from './vision-extraction.service';
 import { PaddleOcrService } from './ocr/paddle-ocr.service';
 import { ConfirmedSettlementService } from './confirmed-settlement.service';
 import { assertConfirmationCanonicalText } from './confirmed-settlement.mapper';
+import { SettlementAnalysisService } from './settlement-analysis.service';
 
 type UploadedImagePage = {
   buffer: Buffer;
@@ -228,6 +229,22 @@ const parseIncludeHistory = (value: unknown): boolean => {
   return invalidRequest('includeHistory must be true or false');
 };
 
+const parseQueryInteger = (
+  value: unknown,
+  name: string,
+): number | undefined => {
+  const normalized = parseQueryText(value, name);
+  if (!normalized) return undefined;
+  if (!/^\d+$/.test(normalized)) {
+    invalidRequest(`${name} must be a positive integer`);
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    invalidRequest(`${name} must be a positive integer`);
+  }
+  return parsed;
+};
+
 @Controller('api/reconciliation')
 export class ReconciliationController {
   constructor(
@@ -235,6 +252,7 @@ export class ReconciliationController {
     private readonly visionExtractionService: VisionExtractionService,
     private readonly paddleOcrService: PaddleOcrService,
     private readonly confirmedSettlementService: ConfirmedSettlementService,
+    private readonly settlementAnalysisService?: SettlementAnalysisService,
   ) {}
 
   @Post('confirmed-settlements')
@@ -266,6 +284,62 @@ export class ReconciliationController {
   @Get('confirmed-settlements/:id')
   getConfirmedSettlement(@Param('id') id: string) {
     return this.confirmedSettlementService.getById(id);
+  }
+
+  @Get('analysis/settlements')
+  listSettlementAnalysisBills(
+    @Query('mallName') mallName?: string,
+    @Query('storeCode') storeCode?: string,
+    @Query('periodStart') periodStart?: string,
+    @Query('periodEnd') periodEnd?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.requireSettlementAnalysisService().listBills({
+      mallName: parseQueryText(mallName, 'mallName'),
+      storeCode: parseQueryText(storeCode, 'storeCode'),
+      periodStart: parseQueryDate(periodStart, 'periodStart'),
+      periodEnd: parseQueryDate(periodEnd, 'periodEnd'),
+      limit: parseQueryInteger(limit, 'limit'),
+    });
+  }
+
+  @Get('analysis/settlements/summary')
+  summarizeSettlementAnalysis(
+    @Query('mallName') mallName?: string,
+    @Query('storeCode') storeCode?: string,
+    @Query('periodStart') periodStart?: string,
+    @Query('periodEnd') periodEnd?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.requireSettlementAnalysisService().summarize({
+      mallName: parseQueryText(mallName, 'mallName'),
+      storeCode: parseQueryText(storeCode, 'storeCode'),
+      periodStart: parseQueryDate(periodStart, 'periodStart'),
+      periodEnd: parseQueryDate(periodEnd, 'periodEnd'),
+      limit: parseQueryInteger(limit, 'limit'),
+    });
+  }
+
+  @Get('analysis/settlements/fees')
+  analyzeSettlementFees(
+    @Query('mallName') mallName?: string,
+    @Query('storeCode') storeCode?: string,
+    @Query('periodStart') periodStart?: string,
+    @Query('periodEnd') periodEnd?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.requireSettlementAnalysisService().analyzeFees({
+      mallName: parseQueryText(mallName, 'mallName'),
+      storeCode: parseQueryText(storeCode, 'storeCode'),
+      periodStart: parseQueryDate(periodStart, 'periodStart'),
+      periodEnd: parseQueryDate(periodEnd, 'periodEnd'),
+      limit: parseQueryInteger(limit, 'limit'),
+    });
+  }
+
+  @Get('analysis/settlements/:id')
+  getSettlementAnalysisDetail(@Param('id') id: string) {
+    return this.requireSettlementAnalysisService().getDetail(id);
   }
 
   @Post('ocr-extractions')
@@ -465,5 +539,12 @@ export class ReconciliationController {
   @Delete('mapping-templates/:id')
   deleteMappingTemplate(@Param('id') id: string) {
     return this.service.deleteMappingTemplate(id);
+  }
+
+  private requireSettlementAnalysisService(): SettlementAnalysisService {
+    if (!this.settlementAnalysisService) {
+      throw new BadRequestException('settlement analysis service is unavailable');
+    }
+    return this.settlementAnalysisService;
   }
 }
