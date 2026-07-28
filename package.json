@@ -24,6 +24,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:e2e": "jest --config test/e2e/jest.config.js",
+    "test:postgres": "node tools/run-confirmed-settlement-postgres-test.js",
     "eslint": "eslint . --quiet",
     "stylelint": "stylelint client/src/**/*.css --quiet",
     "type:check": "concurrently -n \"server,client\" -c \"blue,green\" \"npm run type:check:server\" \"npm run type:check:client\"",
@@ -125,6 +126,7 @@
     "@types/node": "^22.18.6",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
+    "@types/supertest": "^7.2.1",
     "autoprefixer": "^10.4.21",
     "class-variance-authority": "^0.7.1",
     "clsx": "~2.0.1",
@@ -177,6 +179,7 @@
     "streamdown": "^1.6.10",
     "style-loader": "^4.0.0",
     "stylelint": "^16.11.0",
+    "supertest": "^7.2.2",
     "tailwind-merge": "~3.4.0",
     "tailwindcss": "^4.1.13",
     "ts-jest": "^29.4.3",
@@ -197,7 +200,20 @@
   },
   "jest": {
     "preset": "ts-jest",
+    "transform": {
+      "^.+\\.tsx?$": [
+        "ts-jest",
+        {
+          "diagnostics": false,
+          "tsconfig": "tsconfig.spec.json"
+        }
+      ]
+    },
     "testEnvironment": "node",
+    "moduleNameMapper": {
+      "^@server/(.*)$": "<rootDir>/server/$1",
+      "^@shared/(.*)$": "<rootDir>/shared/$1"
+    },
     "testMatch": [
       "<rootDir>/server/**/*.spec.ts",
       "<rootDir>/test/unit/**/*.spec.ts"

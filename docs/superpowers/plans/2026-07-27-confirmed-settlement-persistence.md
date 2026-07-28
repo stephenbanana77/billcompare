@@ -80,7 +80,8 @@ const input: ConfirmSettlementBillInput = {
     { id: 'deduction', label: '扣款合计', target: 'deductionTotal', value: '5650.47' },
     { id: 'settlement', label: '实付金额', target: 'settlementAmount', value: '54915.84' },
   ],
-  ocrVerified: true,
+  confirmationKey: '11111111-1111-4111-8111-111111111111',
+  clientReportedOcrVerified: true,
 };
 
 describe('mapConfirmedSettlement', () => {
@@ -126,7 +127,8 @@ export interface ConfirmSettlementBillInput {
   fileName: string;
   extraction: VisionExtractionResult;
   reviewedFields: ConfirmedFieldValue[];
-  ocrVerified: boolean;
+  confirmationKey: string;
+  clientReportedOcrVerified: boolean;
 }
 
 export type ConfirmedSettlementStatus = 'confirmed' | 'superseded' | 'revoked';
@@ -147,7 +149,8 @@ export interface ConfirmedSettlementBill {
   invoiceAmount: string | null;
   deductionTotal: string | null;
   settlementAmount: string;
-  ocrVerified: boolean;
+  confirmationKey: string;
+  clientReportedOcrVerified: boolean;
   confirmedBy: string;
   confirmedAt: string;
   createdAt: string;
@@ -162,6 +165,11 @@ export interface ConfirmedSettlementDetail {
   feeLines: VisionLineItem[];
 }
 ```
+
+`clientReportedOcrVerified` is an operator-client assertion, not
+server-verified OCR evidence. The existing PostgreSQL column remains named
+`ocr_verified` for migration compatibility and carries a database comment with
+the same audit meaning.
 
 - [ ] **Step 4: Re-run TypeScript compilation to expose only the missing mapper**
 
@@ -291,7 +299,8 @@ export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
       invoiceAmount: money(value('invoiceAmount'), 'invoiceAmount'),
       deductionTotal: money(value('deductionTotal'), 'deductionTotal'),
       settlementAmount: money(value('settlementAmount'), 'settlementAmount')!,
-      ocrVerified: Boolean(input.ocrVerified),
+      confirmationKey: input.confirmationKey,
+      clientReportedOcrVerified: Boolean(input.clientReportedOcrVerified),
       reviewedFields: input.reviewedFields,
       extractionPayload: input.extraction,
     },
@@ -365,6 +374,7 @@ CREATE TABLE reconciliation_confirmed_bills (
   invoice_amount numeric(16,2),
   deduction_total numeric(16,2),
   settlement_amount numeric(16,2) NOT NULL,
+  confirmation_key varchar(100) NOT NULL,
   ocr_verified boolean NOT NULL DEFAULT false,
   reviewed_fields jsonb NOT NULL,
   extraction_payload jsonb NOT NULL,
@@ -516,6 +526,8 @@ git commit -m "feat: persist confirmed settlement versions"
 
 ## Task 5: REST Confirmation And Query Endpoints
 
+> Scope note: these endpoints use the platform's existing global authentication. Store, region, and finance/admin authorization is intentionally deferred to the separately approved permissions and analytics plan.
+
 **Files:**
 
 - Modify: `server/modules/reconciliation/reconciliation.module.ts`
@@ -652,7 +664,8 @@ const confirmSettlement = async () => {
         target,
         value,
       })),
-      ocrVerified: Boolean(ocrResult) && !ocrBlocksConfirmation,
+      confirmationKey,
+      clientReportedOcrVerified: Boolean(ocrResult) && !ocrBlocksConfirmation,
     });
     setConfirmedDetail(detail);
     setConfirmed(true);
@@ -699,6 +712,14 @@ git commit -m "feat: confirm recognized bills through backend"
 
 Use the same migration execution path used for migrations 001-006 in the target environment. Verify with:
 
+For Miaoda development databases, run the migration through the platform DDL
+channel rather than the public `SUDA_DATABASE_URL` connection:
+
+```powershell
+lark-cli apps +db-execute --app-id <app-id> --environment dev --file ./migrations/007_confirmed_settlement_bills.sql --dry-run --as user
+lark-cli apps +db-execute --app-id <app-id> --environment dev --file ./migrations/007_confirmed_settlement_bills.sql --yes --as user
+```
+
 ```sql
 SELECT table_name
 FROM information_schema.tables
@@ -713,6 +734,13 @@ ORDER BY table_name;
 Expected: exactly three rows.
 
 - [ ] **Step 2: Run the complete automated verification suite**
+
+The repository has no dedicated PostgreSQL test database configuration. Task 4
+therefore verifies transaction boundaries with a controlled database double.
+In this step, add or run real PostgreSQL integration checks proving that
+concurrent confirmations for the same full logical identity allocate sequential
+versions, and that a forced detail-line insert failure rolls back both the bill
+insert and any active-version supersede update.
 
 ```powershell
 npm test -- --runInBand
