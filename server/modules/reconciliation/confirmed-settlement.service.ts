@@ -62,6 +62,18 @@ export class ConfirmedSettlementService {
         eq(reconciliationConfirmedBills.billType, mapped.bill.billType),
       ];
 
+      const [existingConfirmation] = await tx
+        .select({ id: reconciliationConfirmedBills.id })
+        .from(reconciliationConfirmedBills)
+        .where(
+          eq(
+            reconciliationConfirmedBills.confirmationKey,
+            mapped.bill.confirmationKey,
+          ),
+        )
+        .limit(1);
+      if (existingConfirmation) return existingConfirmation.id;
+
       const [latest] = await tx
         .select({
           id: reconciliationConfirmedBills.id,

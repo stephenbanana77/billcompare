@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getTableName, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -91,7 +91,8 @@ const input = (): ConfirmSettlementBillInput => ({
       value: '113.00',
     },
   ],
-  ocrVerified: true,
+  confirmationKey: '11111111-1111-4111-8111-111111111111',
+  clientReportedOcrVerified: true,
 });
 
 type BillRow = typeof reconciliationConfirmedBills.$inferSelect;
@@ -110,6 +111,7 @@ class DatabaseDouble {
   readonly selectLimits: number[] = [];
   existingActive: Pick<BillRow, 'id' | 'version'> | undefined;
   highestHistorical: Pick<BillRow, 'id' | 'version'> | undefined;
+  existingByConfirmationKey: Pick<BillRow, 'id' | 'version'> | undefined;
   failOn: 'bill:insert' | 'sales:insert' | 'fee:insert' | undefined;
   bills: BillRow[] = [];
   salesRows: Array<typeof reconciliationConfirmedSalesLines.$inferSelect> = [];
@@ -225,6 +227,11 @@ class DatabaseDouble {
   private rowsFor(table: unknown, where?: SQL) {
     if (table === reconciliationConfirmedBills) {
       const query = where ? sqlQuery(where) : undefined;
+      if (query?.sql.includes('confirmation_key')) {
+        return this.existingByConfirmationKey
+          ? [this.existingByConfirmationKey]
+          : [];
+      }
       if (query?.params.includes('confirmed')) {
         if (this.existingActive) return [this.existingActive];
         return this.bills.filter((bill) => bill.status === 'confirmed');
@@ -303,6 +310,19 @@ describe('confirmed settlement schema', () => {
       'period_start',
       'period_end',
     ]);
+    expect(
+      config.columns.find((column) => column.name === 'confirmation_key')
+        ?.notNull,
+    ).toBe(true);
+    expect(
+      config.columns.find((column) => column.name === 'ocr_verified')?.name,
+    ).toBe('ocr_verified');
+    expect(
+      config.indexes.find(
+        (candidate) =>
+          candidate.config.name === 'uq_confirmed_bill_confirmation_key',
+      )?.config.unique,
+    ).toBe(true);
   });
 
   it.each([
@@ -358,6 +378,21 @@ describe('confirmed settlement schema', () => {
     expect(migration).toContain(
       'CONSTRAINT uq_confirmed_fee_bill_sequence UNIQUE (bill_id, sequence)',
     );
+    expect(migration).toContain('confirmation_key varchar(100) NOT NULL');
+    expect(migration).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_bill_confirmation_key',
+    );
+    expect(migration).toContain(
+      "COMMENT ON COLUMN reconciliation_confirmed_bills.ocr_verified IS 'Client-reported OCR cross-check status; not server-verified evidence.'",
+    );
+    expect(
+      existsSync(
+        join(
+          process.cwd(),
+          'migrations/008_confirmed_settlement_idempotency.sql',
+        ),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -400,6 +435,40 @@ describe('ConfirmedSettlementService', () => {
     expect(db.events.indexOf('transaction:commit')).toBeLessThan(
       db.events.indexOf('getById'),
     );
+  });
+
+  it('returns the existing bill for the same confirmation key without creating a version', async () => {
+    const db = new DatabaseDouble();
+    db.existingByConfirmationKey = { id: 'existing-id', version: 1 };
+    const service = new ConfirmedSettlementService(db as never);
+    const existing = detailFrom(db);
+    existing.bill = { ...existing.bill, id: 'existing-id', version: 1 };
+    jest.spyOn(service, 'getById').mockResolvedValue(existing);
+
+    const result = await service.confirm(input());
+
+    expect(result.bill).toMatchObject({ id: 'existing-id', version: 1 });
+    expect(db.billInserts).toHaveLength(0);
+    expect(db.updates).toHaveLength(0);
+    expect(db.salesInserts).toHaveLength(0);
+    expect(db.feeInserts).toHaveLength(0);
+  });
+
+  it('persists a different confirmation key as the next version', async () => {
+    const db = new DatabaseDouble();
+    db.existingActive = { id: 'old-id', version: 1 };
+    db.highestHistorical = { id: 'old-id', version: 1 };
+    const service = createService(db);
+    const next = input();
+    next.confirmationKey = '22222222-2222-4222-8222-222222222222';
+
+    const result = await service.confirm(next);
+
+    expect(result.bill.version).toBe(2);
+    expect(db.billInserts[0]).toMatchObject({
+      version: 2,
+      confirmationKey: next.confirmationKey,
+    });
   });
 
   it('maps and validates input before opening a transaction', async () => {
@@ -455,7 +524,11 @@ describe('ConfirmedSettlementService', () => {
 
     const historyQuery = db.selectWheres
       .map(sqlQuery)
-      .find((query) => !query.params.includes('confirmed'));
+      .find(
+        (query) =>
+          !query.params.includes('confirmed') &&
+          query.params.includes('Mall A'),
+      );
     expect(historyQuery?.params).toEqual(
       expect.arrayContaining([
         'Mall A',

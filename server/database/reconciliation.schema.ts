@@ -49,7 +49,8 @@ export const reconciliationConfirmedBills = pgTable(
       precision: 16,
       scale: 2,
     }).notNull(),
-    ocrVerified: boolean('ocr_verified').notNull().default(false),
+    confirmationKey: varchar('confirmation_key', { length: 100 }).notNull(),
+    clientReportedOcrVerified: boolean('ocr_verified').notNull().default(false),
     reviewedFields: jsonb('reviewed_fields')
       .$type<ConfirmedFieldValue[]>()
       .notNull(),
@@ -90,6 +91,7 @@ export const reconciliationConfirmedBills = pgTable(
         table.billType,
       )
       .where(sql`${table.status} = 'confirmed'`),
+    uniqueIndex('uq_confirmed_bill_confirmation_key').on(table.confirmationKey),
     index('idx_confirmed_bill_query').on(
       table.mallName,
       table.storeCode,

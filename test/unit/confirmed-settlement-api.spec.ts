@@ -41,8 +41,22 @@ const validInput = (): ConfirmSettlementBillInput => ({
     lineItems: [],
     warnings: [],
   },
-  reviewedFields: [],
-  ocrVerified: true,
+  reviewedFields: [
+    { id: 'mall', label: 'Mall', target: 'mallName', value: 'Mall A' },
+    { id: 'store', label: 'Store', target: 'storeName', value: 'Store A' },
+    { id: 'code', label: 'Code', target: 'storeCode', value: '086203' },
+    { id: 'start', label: 'Start', target: 'periodStart', value: '2026-05-01' },
+    { id: 'end', label: 'End', target: 'periodEnd', value: '2026-05-31' },
+    { id: 'sales', label: 'Sales', target: 'salesAmount', value: '100.00' },
+    {
+      id: 'settlement',
+      label: 'Settlement',
+      target: 'settlementAmount',
+      value: '90.00',
+    },
+  ],
+  confirmationKey: '11111111-1111-4111-8111-111111111111',
+  clientReportedOcrVerified: true,
 });
 
 const inputWithLine = (overrides: Record<string, unknown>) => {
@@ -150,7 +164,7 @@ describe('confirmed settlement API contract', () => {
     {},
     { ...validInput(), reviewedFields: null },
     { ...validInput(), extraction: null },
-    { ...validInput(), ocrVerified: 'true' },
+    { ...validInput(), clientReportedOcrVerified: 'true' },
     {
       ...validInput(),
       extraction: { ...validInput().extraction, metadata: null },

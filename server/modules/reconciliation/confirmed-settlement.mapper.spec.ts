@@ -146,7 +146,8 @@ const createInput = (): ConfirmSettlementBillInput => {
       },
       { id: 'ignored', label: '忽略字段', target: '', value: 'ignored' },
     ],
-    ocrVerified: true,
+    confirmationKey: '11111111-1111-4111-8111-111111111111',
+    clientReportedOcrVerified: true,
   };
 };
 
@@ -179,7 +180,8 @@ describe('mapConfirmedSettlement', () => {
       invoiceAmount: '60566.31',
       deductionTotal: null,
       settlementAmount: '54915.84',
-      ocrVerified: true,
+      confirmationKey: '11111111-1111-4111-8111-111111111111',
+      clientReportedOcrVerified: true,
       reviewedFields: input.reviewedFields,
       extractionPayload: input.extraction,
     });
@@ -341,6 +343,69 @@ describe('mapConfirmedSettlement', () => {
     setReviewedValue(input, 'periodEnd', '2026-05-31');
 
     expect(() => mapConfirmedSettlement(input)).toThrow('periodStart');
+  });
+
+  it.each([
+    [
+      'fileName',
+      255,
+      (input: ConfirmSettlementBillInput, value: string) => {
+        input.fileName = value;
+      },
+    ],
+    [
+      'mallName',
+      120,
+      (input: ConfirmSettlementBillInput, value: string) => {
+        setReviewedValue(input, 'mallName', value);
+      },
+    ],
+    [
+      'storeName',
+      120,
+      (input: ConfirmSettlementBillInput, value: string) => {
+        setReviewedValue(input, 'storeName', value);
+      },
+    ],
+    [
+      'storeCode',
+      60,
+      (input: ConfirmSettlementBillInput, value: string) => {
+        setReviewedValue(input, 'storeCode', value);
+      },
+    ],
+    [
+      'settlementNo',
+      120,
+      (input: ConfirmSettlementBillInput, value: string) => {
+        setReviewedValue(input, 'settlementNo', value);
+      },
+    ],
+  ])(
+    'accepts the %s database boundary and rejects one character over it',
+    (field, limit, assign) => {
+      const boundary = createInput();
+      assign(boundary, 'x'.repeat(limit));
+      expect(() => mapConfirmedSettlement(boundary)).not.toThrow();
+
+      const overflow = createInput();
+      assign(overflow, 'x'.repeat(limit + 1));
+      expect(() => mapConfirmedSettlement(overflow)).toThrow(
+        `${field} must not exceed ${limit} characters`,
+      );
+    },
+  );
+
+  it('rejects a missing or oversized confirmation key', () => {
+    const missing = createInput();
+    missing.confirmationKey = '';
+    expect(() => mapConfirmedSettlement(missing)).toThrow('confirmationKey');
+
+    const oversized = createInput();
+    oversized.confirmationKey = 'x'.repeat(101);
+    expect(() => mapConfirmedSettlement(oversized)).toThrow(
+      'confirmationKey must not exceed 100 characters',
+    );
   });
 
   it('detaches returned audit data from later input mutations', () => {

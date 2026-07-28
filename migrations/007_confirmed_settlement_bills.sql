@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_bills (
   invoice_amount numeric(16,2),
   deduction_total numeric(16,2),
   settlement_amount numeric(16,2) NOT NULL,
+  confirmation_key varchar(100) NOT NULL,
   ocr_verified boolean NOT NULL DEFAULT false,
   reviewed_fields jsonb NOT NULL,
   extraction_payload jsonb NOT NULL,
@@ -32,6 +33,12 @@ CREATE TABLE IF NOT EXISTS reconciliation_confirmed_bills (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_bill_active_period
   ON reconciliation_confirmed_bills(mall_name, store_code, period_start, period_end, bill_type)
   WHERE status = 'confirmed';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_bill_confirmation_key
+  ON reconciliation_confirmed_bills(confirmation_key);
+
+COMMENT ON COLUMN reconciliation_confirmed_bills.ocr_verified IS
+  'Client-reported OCR cross-check status; not server-verified evidence.';
 
 CREATE INDEX IF NOT EXISTS idx_confirmed_bill_query
   ON reconciliation_confirmed_bills(mall_name, store_code, period_start, period_end, status, bill_type);

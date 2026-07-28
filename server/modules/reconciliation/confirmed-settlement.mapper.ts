@@ -17,6 +17,33 @@ const requiredTargets = [
 
 const text = (value: unknown): string => String(value ?? '').trim();
 
+const canonicalTextLimits = {
+  fileName: 255,
+  mallName: 120,
+  storeName: 120,
+  storeCode: 60,
+  settlementNo: 120,
+  confirmationKey: 100,
+} as const;
+
+const boundedText = (
+  value: unknown,
+  field: keyof typeof canonicalTextLimits,
+  required: boolean,
+): string => {
+  const normalized = text(value);
+  if (required && !normalized) {
+    throw new BadRequestException(`${field} is required`);
+  }
+  const limit = canonicalTextLimits[field];
+  if (Array.from(normalized).length > limit) {
+    throw new BadRequestException(
+      `${field} must not exceed ${limit} characters`,
+    );
+  }
+  return normalized;
+};
+
 const invalidMoney = (target: string): never => {
   throw new BadRequestException(
     `${target} must be a valid numeric(16,2) amount`,
@@ -120,16 +147,30 @@ const indexReviewedFields = (fields: ConfirmedFieldValue[]) => {
   return reviewed;
 };
 
+export const assertConfirmationCanonicalText = (
+  input: ConfirmSettlementBillInput,
+): void => {
+  boundedText(input.fileName, 'fileName', true);
+  boundedText(input.confirmationKey, 'confirmationKey', true);
+  const reviewed = new Map(
+    input.reviewedFields
+      .filter((field) => text(field.target))
+      .map((field) => [text(field.target), field.value]),
+  );
+  boundedText(reviewed.get('mallName'), 'mallName', true);
+  boundedText(reviewed.get('storeName'), 'storeName', true);
+  boundedText(reviewed.get('storeCode'), 'storeCode', true);
+  boundedText(reviewed.get('settlementNo'), 'settlementNo', false);
+};
+
 const isSalesLine = (line: VisionLineItem): boolean =>
   line.section.includes('销售');
 const isFeeLine = (line: VisionLineItem): boolean =>
   line.section.includes('费用');
 
 export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
-  const sourceFileName = text(input.fileName);
-  if (!sourceFileName) {
-    throw new BadRequestException('fileName is required');
-  }
+  assertConfirmationCanonicalText(input);
+  const sourceFileName = boundedText(input.fileName, 'fileName', true);
 
   const reviewed = indexReviewedFields(input.reviewedFields);
   const value = (target: string) => reviewed.get(target)?.value;
@@ -145,13 +186,14 @@ export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
   return {
     bill: {
       sourceFileName,
-      mallName: text(value('mallName')),
-      storeName: text(value('storeName')),
-      storeCode: text(value('storeCode')),
+      mallName: boundedText(value('mallName'), 'mallName', true),
+      storeName: boundedText(value('storeName'), 'storeName', true),
+      storeCode: boundedText(value('storeCode'), 'storeCode', true),
       periodStart,
       periodEnd,
       billType: input.extraction.metadata.billType,
-      settlementNo: text(value('settlementNo')) || null,
+      settlementNo:
+        boundedText(value('settlementNo'), 'settlementNo', false) || null,
       salesAmount: requiredMoney(value('salesAmount'), 'salesAmount'),
       invoiceAmount: money(value('invoiceAmount'), 'invoiceAmount'),
       deductionTotal: money(value('deductionTotal'), 'deductionTotal'),
@@ -159,7 +201,12 @@ export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
         value('settlementAmount'),
         'settlementAmount',
       ),
-      ocrVerified: Boolean(input.ocrVerified),
+      confirmationKey: boundedText(
+        input.confirmationKey,
+        'confirmationKey',
+        true,
+      ),
+      clientReportedOcrVerified: Boolean(input.clientReportedOcrVerified),
       reviewedFields,
       extractionPayload,
     },

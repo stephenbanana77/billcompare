@@ -29,6 +29,7 @@ import { ReconciliationService } from './reconciliation.service';
 import { VisionExtractionService } from './vision-extraction.service';
 import { PaddleOcrService } from './ocr/paddle-ocr.service';
 import { ConfirmedSettlementService } from './confirmed-settlement.service';
+import { assertConfirmationCanonicalText } from './confirmed-settlement.mapper';
 
 type UploadedImagePage = {
   buffer: Buffer;
@@ -114,8 +115,14 @@ const assertConfirmationInput: (
   if (typeof input.fileName !== 'string' || !input.fileName.trim()) {
     invalidRequest('fileName is required');
   }
-  if (typeof input.ocrVerified !== 'boolean') {
-    invalidRequest('ocrVerified must be a boolean');
+  if (
+    typeof input.confirmationKey !== 'string' ||
+    !input.confirmationKey.trim()
+  ) {
+    invalidRequest('confirmationKey is required');
+  }
+  if (typeof input.clientReportedOcrVerified !== 'boolean') {
+    invalidRequest('clientReportedOcrVerified must be a boolean');
   }
   if (!Array.isArray(input.reviewedFields)) {
     invalidRequest('reviewedFields must be an array');
@@ -177,6 +184,9 @@ const assertConfirmationInput: (
   if (lineItems.some((line) => !isValidLineItem(line))) {
     invalidRequest('extraction.lineItems contains an invalid line');
   }
+  assertConfirmationCanonicalText(
+    input as unknown as ConfirmSettlementBillInput,
+  );
 };
 
 const parseQueryText = (value: unknown, name: string): string | undefined => {

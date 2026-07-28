@@ -25,9 +25,12 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
   const createInput = (
     fileName: string,
     confidence = 0.99,
+    confirmationKey = randomUUID(),
+    inputStoreCode = storeCode,
   ): ConfirmSettlementBillInput => ({
     fileName,
-    ocrVerified: true,
+    confirmationKey,
+    clientReportedOcrVerified: true,
     extraction: {
       sourceType: 'vision_llm',
       fileName,
@@ -36,7 +39,7 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
       metadata: {
         mallName,
         storeName: 'Integration Store',
-        storeCode,
+        storeCode: inputStoreCode,
         periodStart: '2099-01-01',
         periodEnd: '2099-01-31',
         billType: 'standard',
@@ -78,7 +81,12 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
         target: 'storeName',
         value: 'Integration Store',
       },
-      { id: 'code', label: 'Code', target: 'storeCode', value: storeCode },
+      {
+        id: 'code',
+        label: 'Code',
+        target: 'storeCode',
+        value: inputStoreCode,
+      },
       {
         id: 'start',
         label: 'Start',
@@ -169,6 +177,45 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
     expect(afterFailure).toMatchObject([
       { version: 1, status: 'superseded' },
       { version: 2, status: 'confirmed' },
+    ]);
+  }, 30_000);
+
+  it('returns one version for a retried key and creates V2 for a new key', async () => {
+    const idempotentStoreCode = `${storeCode}-IDEM`;
+    const confirmationKey = randomUUID();
+
+    const first = await service.confirm(
+      createInput('idempotent.pdf', 0.99, confirmationKey, idempotentStoreCode),
+    );
+    const retry = await service.confirm(
+      createInput('idempotent.pdf', 0.99, confirmationKey, idempotentStoreCode),
+    );
+    const next = await service.confirm(
+      createInput('idempotent-v2.pdf', 0.99, randomUUID(), idempotentStoreCode),
+    );
+
+    expect(retry.bill).toMatchObject({
+      id: first.bill.id,
+      version: first.bill.version,
+    });
+    expect(first.bill.version).toBe(1);
+    expect(next.bill.version).toBe(2);
+
+    const persisted = await client`
+      SELECT id, version, status, confirmation_key
+      FROM reconciliation_confirmed_bills
+      WHERE mall_name = ${mallName}
+        AND store_code = ${idempotentStoreCode}
+      ORDER BY version
+    `;
+    expect(persisted).toMatchObject([
+      {
+        id: first.bill.id,
+        version: 1,
+        status: 'superseded',
+        confirmation_key: confirmationKey,
+      },
+      { id: next.bill.id, version: 2, status: 'confirmed' },
     ]);
   }, 30_000);
 });

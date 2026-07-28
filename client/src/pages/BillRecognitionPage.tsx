@@ -402,9 +402,11 @@ export default function BillRecognitionPage() {
     const confirmationToken = requestCoordinator.current.beginConfirmation(billIdentity);
     if (!confirmationToken) return;
     setConfirming(true);
+    let confirmationPersisted = false;
     try {
       const input = {
         fileName,
+        confirmationKey: confirmationToken.confirmationKey!,
         extraction: result,
         reviewedFields: rows.map(({ id, source, target, value }) => ({
           id,
@@ -412,7 +414,7 @@ export default function BillRecognitionPage() {
           target,
           value,
         })),
-        ocrVerified: Boolean(ocrResult) && !ocrBlocksConfirmation,
+        clientReportedOcrVerified: Boolean(ocrResult) && !ocrBlocksConfirmation,
       };
       const detail = await persistSettlementConfirmation(
         input,
@@ -421,14 +423,17 @@ export default function BillRecognitionPage() {
         confirmationToken,
         setConfirmedDetail,
       );
-      if (detail) toast.success(`结算单已确认，版本 V${detail.bill.version}`);
+      if (detail) {
+        confirmationPersisted = true;
+        toast.success(`结算单已确认，版本 V${detail.bill.version}`);
+      }
     } catch (error) {
       if (requestCoordinator.current.isConfirmationCurrent(confirmationToken)) {
         toast.error(error instanceof Error ? error.message : '确认结算单失败');
       }
     } finally {
       const requestIsCurrent = requestCoordinator.current.isConfirmationCurrent(confirmationToken);
-      requestCoordinator.current.finishConfirmation(confirmationToken);
+      requestCoordinator.current.finishConfirmation(confirmationToken, confirmationPersisted);
       if (requestIsCurrent) setConfirming(false);
     }
   };

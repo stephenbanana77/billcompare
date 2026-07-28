@@ -16,6 +16,7 @@ export type SettlementRequestToken = Readonly<{
   kind: 'recognition' | 'confirmation';
   revision: number;
   billIdentity: string | null;
+  confirmationKey: string | null;
 }>;
 
 export type SettlementRequestCoordinator = ReturnType<
@@ -59,6 +60,10 @@ export function createSettlementRequestCoordinator() {
   let revision = 0;
   let billIdentity: string | null = null;
   let activeConfirmation: SettlementRequestToken | null = null;
+  let pendingConfirmation: Readonly<{
+    billIdentity: string;
+    confirmationKey: string;
+  }> | null = null;
 
   const matches = (
     left: SettlementRequestToken | null,
@@ -87,7 +92,13 @@ export function createSettlementRequestCoordinator() {
       if (activeConfirmation) return null;
       revision += 1;
       billIdentity = null;
-      return { kind: 'recognition', revision, billIdentity: null };
+      pendingConfirmation = null;
+      return {
+        kind: 'recognition',
+        revision,
+        billIdentity: null,
+        confirmationKey: null,
+      };
     },
     isRecognitionCurrent,
     activateBill(
@@ -100,14 +111,21 @@ export function createSettlementRequestCoordinator() {
       revision += 1;
       billIdentity = identity;
       activeConfirmation = null;
+      pendingConfirmation = null;
       return true;
     },
     beginConfirmation(identity: string): SettlementRequestToken | null {
       if (activeConfirmation || identity !== billIdentity) return null;
+      const confirmationKey =
+        pendingConfirmation?.billIdentity === identity
+          ? pendingConfirmation.confirmationKey
+          : crypto.randomUUID();
+      pendingConfirmation = { billIdentity: identity, confirmationKey };
       activeConfirmation = {
         kind: 'confirmation',
         revision,
         billIdentity: identity,
+        confirmationKey,
       };
       return activeConfirmation;
     },
@@ -118,8 +136,18 @@ export function createSettlementRequestCoordinator() {
         token?.revision === revision,
       );
     },
-    finishConfirmation(token: SettlementRequestToken | null): void {
-      if (matches(activeConfirmation, token)) activeConfirmation = null;
+    finishConfirmation(
+      token: SettlementRequestToken | null,
+      persisted = false,
+    ): void {
+      if (!matches(activeConfirmation, token)) return;
+      activeConfirmation = null;
+      if (
+        persisted &&
+        pendingConfirmation?.confirmationKey === token?.confirmationKey
+      ) {
+        pendingConfirmation = null;
+      }
     },
     currentBillIdentity(): string | null {
       return billIdentity;

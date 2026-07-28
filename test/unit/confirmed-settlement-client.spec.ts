@@ -60,7 +60,8 @@ const input: ConfirmSettlementBillInput = {
   fileName: 'SHAD64结算单-202605.pdf',
   extraction,
   reviewedFields,
-  ocrVerified: true,
+  confirmationKey: '11111111-1111-4111-8111-111111111111',
+  clientReportedOcrVerified: true,
 };
 
 const detail: ConfirmedSettlementDetail = {
@@ -80,7 +81,8 @@ const detail: ConfirmedSettlementDetail = {
     invoiceAmount: '60566.31',
     deductionTotal: '5650.47',
     settlementAmount: '54915.84',
-    ocrVerified: true,
+    confirmationKey: input.confirmationKey,
+    clientReportedOcrVerified: true,
     confirmedBy: 'Demo Operator',
     confirmedAt: '2026-07-27T08:00:00.000Z',
     createdAt: '2026-07-27T08:00:00.000Z',
@@ -203,6 +205,25 @@ describe('confirmed settlement client', () => {
 
     expect(coordinator.beginRecognition()).toBeNull();
     expect(coordinator.currentBillIdentity()).toBe(identity);
+  });
+
+  it('reuses one confirmation key after a failed request and rotates it after success', () => {
+    const coordinator = createSettlementRequestCoordinator();
+    const identity = getSettlementBillIdentity(input.fileName, extraction);
+    coordinator.activateBill(identity);
+
+    const first = coordinator.beginConfirmation(identity);
+    expect(first?.confirmationKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    coordinator.finishConfirmation(first, false);
+
+    const retry = coordinator.beginConfirmation(identity);
+    expect(retry?.confirmationKey).toBe(first?.confirmationKey);
+    coordinator.finishConfirmation(retry, true);
+
+    const next = coordinator.beginConfirmation(identity);
+    expect(next?.confirmationKey).not.toBe(first?.confirmationKey);
   });
 
   it('ignores a delayed confirmation response after the active bill changes', async () => {

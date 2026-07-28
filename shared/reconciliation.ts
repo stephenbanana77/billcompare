@@ -350,7 +350,8 @@ export interface ConfirmSettlementBillInput {
   fileName: string;
   extraction: VisionExtractionResult;
   reviewedFields: ConfirmedFieldValue[];
-  ocrVerified: boolean;
+  confirmationKey: string;
+  clientReportedOcrVerified: boolean;
 }
 
 export type ConfirmedSettlementStatus = 'confirmed' | 'superseded' | 'revoked';
@@ -371,7 +372,8 @@ export interface ConfirmedSettlementBill {
   invoiceAmount: string | null;
   deductionTotal: string | null;
   settlementAmount: string;
-  ocrVerified: boolean;
+  confirmationKey: string;
+  clientReportedOcrVerified: boolean;
   confirmedBy: string;
   confirmedAt: string;
   createdAt: string;
