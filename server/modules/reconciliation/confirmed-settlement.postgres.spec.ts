@@ -13,6 +13,15 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env'), quiet: true });
 
 const runPostgres = process.env.RUN_POSTGRES_INTEGRATION === '1';
 const describePostgres = runPostgres ? describe : describe.skip;
+const advisoryLockMallName = 'Codex Advisory Namespace Test';
+const advisoryCollisionA = {
+  confirmationKey: '6b76a394-1f12-1638-909f-6fe57505aadc',
+  storeCode: 'CI-DEADLOCK-016897',
+};
+const advisoryCollisionB = {
+  confirmationKey: '2f290e7e-b3c7-fd2e-d078-b668b7cf7408',
+  storeCode: 'CI-DEADLOCK-028928',
+};
 
 describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
   const runId = randomUUID();
@@ -27,6 +36,16 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
     await client`
       DELETE FROM reconciliation_confirmed_bills
       WHERE mall_name = ${mallName}
+         OR (
+           mall_name = ${advisoryLockMallName}
+           AND store_code IN (
+             ${advisoryCollisionA.storeCode},
+             ${advisoryCollisionB.storeCode}
+           )
+           AND period_start = '2099-01-01'
+           AND period_end = '2099-01-31'
+           AND bill_type = 'standard'
+         )
     `;
   };
 
@@ -121,6 +140,21 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
       },
     ],
   });
+
+  const createAdvisoryLockInput = (
+    fileName: string,
+    confirmationKey: string,
+    inputStoreCode: string,
+  ) => {
+    const result = createInput(fileName, 0.99, confirmationKey, inputStoreCode);
+    result.extraction.metadata.mallName = advisoryLockMallName;
+    const reviewedMall = result.reviewedFields.find(
+      (field) => field.target === 'mallName',
+    );
+    if (!reviewedMall) throw new Error('mallName test field is missing');
+    reviewedMall.value = advisoryLockMallName;
+    return result;
+  };
 
   beforeAll(async () => {
     if (!databaseUrl) throw new Error('SUDA_DATABASE_URL is not configured');
@@ -275,5 +309,54 @@ describePostgres('ConfirmedSettlementService PostgreSQL integration', () => {
       status: 'confirmed',
       confirmation_key: sharedKey,
     });
+  }, 30_000);
+
+  it('avoids a deadlock for cross-input confirmation and identity hash collisions', async () => {
+    const firstIdentity = JSON.stringify([
+      advisoryLockMallName,
+      advisoryCollisionB.storeCode,
+      '2099-01-01',
+      '2099-01-31',
+      'standard',
+    ]);
+    const secondIdentity = JSON.stringify([
+      advisoryLockMallName,
+      advisoryCollisionA.storeCode,
+      '2099-01-01',
+      '2099-01-31',
+      'standard',
+    ]);
+    const [hashes] = await client`
+      SELECT
+        hashtext(${advisoryCollisionA.confirmationKey}) AS first_key_hash,
+        hashtext(${firstIdentity}) AS first_identity_hash,
+        hashtext(${advisoryCollisionB.confirmationKey}) AS second_key_hash,
+        hashtext(${secondIdentity}) AS second_identity_hash
+    `;
+
+    expect(hashes.first_key_hash).toBe(hashes.second_identity_hash);
+    expect(hashes.second_key_hash).toBe(hashes.first_identity_hash);
+
+    const confirmations = await Promise.all([
+      service.confirm(
+        createAdvisoryLockInput(
+          'cross-lock-a.pdf',
+          advisoryCollisionA.confirmationKey,
+          advisoryCollisionB.storeCode,
+        ),
+      ),
+      service.confirm(
+        createAdvisoryLockInput(
+          'cross-lock-b.pdf',
+          advisoryCollisionB.confirmationKey,
+          advisoryCollisionA.storeCode,
+        ),
+      ),
+    ]);
+
+    expect(confirmations.map(({ bill }) => bill.version)).toEqual([1, 1]);
+    expect(confirmations.map(({ bill }) => bill.storeCode).sort()).toEqual(
+      [advisoryCollisionA.storeCode, advisoryCollisionB.storeCode].sort(),
+    );
   }, 30_000);
 });

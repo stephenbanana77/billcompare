@@ -10,7 +10,11 @@ import {
   reconciliationConfirmedFeeLines,
   reconciliationConfirmedSalesLines,
 } from '../../database/reconciliation.schema';
-import { ConfirmedSettlementService } from './confirmed-settlement.service';
+import {
+  BILL_IDENTITY_LOCK_NAMESPACE,
+  CONFIRMATION_KEY_LOCK_NAMESPACE,
+  ConfirmedSettlementService,
+} from './confirmed-settlement.service';
 
 const columnNames = (columns: Array<{ name?: string }>) =>
   columns.map((column) => column.name);
@@ -524,7 +528,7 @@ describe('ConfirmedSettlementService', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  it('locks the confirmation key before identity versioning and supersedes V1 before inserting V2', async () => {
+  it('locks confirmation keys and bill identities in distinct PostgreSQL namespaces', async () => {
     const db = new DatabaseDouble();
     db.existingActive = { id: 'old-id', version: 1 };
     db.highestHistorical = { id: 'old-id', version: 1 };
@@ -540,18 +544,25 @@ describe('ConfirmedSettlementService', () => {
       'standard',
     ];
     const keyLock = sqlQuery(db.executed[0]);
+    const identityLock = sqlQuery(db.executed[1]);
     const activeQuery = db.selectWheres
       .map(sqlQuery)
       .find((query) => query.params.includes('confirmed'));
-    expect(keyLock.sql).toContain('pg_advisory_xact_lock');
-    expect(keyLock.sql).toContain('select 1 as locked from');
-    expect(keyLock.params).toContain(input().confirmationKey);
-    expect(
-      db.executed
-        .slice(1)
-        .map(sqlQuery)
-        .some((query) => query.params.includes(JSON.stringify(identity))),
-    ).toBe(true);
+    expect(CONFIRMATION_KEY_LOCK_NAMESPACE).not.toBe(
+      BILL_IDENTITY_LOCK_NAMESPACE,
+    );
+    expect(keyLock.sql).toContain('pg_advisory_xact_lock($1, hashtext($2))');
+    expect(keyLock.params).toEqual([
+      CONFIRMATION_KEY_LOCK_NAMESPACE,
+      input().confirmationKey,
+    ]);
+    expect(identityLock.sql).toContain(
+      'pg_advisory_xact_lock($1, hashtext($2))',
+    );
+    expect(identityLock.params).toEqual([
+      BILL_IDENTITY_LOCK_NAMESPACE,
+      JSON.stringify(identity),
+    ]);
     expect(activeQuery?.params).toEqual(
       expect.arrayContaining([...identity, 'confirmed']),
     );

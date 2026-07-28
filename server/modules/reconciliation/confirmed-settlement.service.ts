@@ -40,6 +40,9 @@ type BillIdentity = Pick<
   'mallName' | 'storeCode' | 'periodStart' | 'periodEnd' | 'billType'
 >;
 
+export const CONFIRMATION_KEY_LOCK_NAMESPACE = 0x434f4e46; // "CONF"
+export const BILL_IDENTITY_LOCK_NAMESPACE = 0x42494c4c; // "BILL"
+
 @Injectable()
 export class ConfirmedSettlementService {
   constructor(
@@ -61,7 +64,7 @@ export class ConfirmedSettlementService {
 
     const id = await this.db.transaction(async (tx) => {
       await tx.execute(
-        sql`select 1 as locked from pg_advisory_xact_lock(hashtext(${mapped.bill.confirmationKey}))`,
+        sql`select 1 as locked from pg_advisory_xact_lock(${CONFIRMATION_KEY_LOCK_NAMESPACE}, hashtext(${mapped.bill.confirmationKey}))`,
       );
       const [existingConfirmation] = await tx
         .select({
@@ -90,7 +93,7 @@ export class ConfirmedSettlementService {
       }
 
       await tx.execute(
-        sql`select 1 as locked from pg_advisory_xact_lock(hashtext(${identityKey}))`,
+        sql`select 1 as locked from pg_advisory_xact_lock(${BILL_IDENTITY_LOCK_NAMESPACE}, hashtext(${identityKey}))`,
       );
       const confirmedAt = new Date().toISOString();
       const identityConditions = [
