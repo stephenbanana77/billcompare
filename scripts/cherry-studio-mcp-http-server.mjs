@@ -73,9 +73,20 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// CherryStudio 会自动探测 OAuth 元数据端点，返回合法 JSON 避免其解析崩溃
+app.all('/.well-known/oauth-authorization-server', (_req, res) => {
+  res.status(404).json({
+    error: 'oauth_not_supported',
+    message: 'This MCP server uses Bearer token authentication, not OAuth.',
+  });
+});
+
 app.post(endpoint, async (req, res) => {
   if (!isAuthorized(req)) {
-    res.status(401).json({
+    res
+      .status(401)
+      .set('WWW-Authenticate', 'Bearer')
+      .json({
       jsonrpc: '2.0',
       error: { code: -32001, message: 'Unauthorized' },
       id: null,
