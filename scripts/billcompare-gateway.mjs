@@ -9,6 +9,7 @@ const host = process.env.BILLCOMPARE_GATEWAY_HOST || '0.0.0.0';
 const port = Number(process.env.BILLCOMPARE_GATEWAY_PORT || '5176');
 const appPort = Number(process.env.BILLCOMPARE_APP_PORT || '3001');
 const mcpPort = Number(process.env.CHERRY_MCP_PORT || '8791');
+const appId = process.env.MIAODA_APP_ID || 'app_17a7d7fdmvg';
 const clientRoot = fileURLToPath(new URL('../dist/client/', import.meta.url));
 
 const contentTypes = new Map([
@@ -65,6 +66,12 @@ async function tryServeClientAsset(req, res, originalUrl) {
 
 const server = http.createServer(async (req, res) => {
   const originalUrl = req.url || '/';
+  if (originalUrl === '/') {
+    res.writeHead(302, { location: `/app/${appId}/` });
+    res.end();
+    return;
+  }
+
   if (await tryServeClientAsset(req, res, originalUrl)) return;
 
   const isMcp = originalUrl === '/mcp' || originalUrl.startsWith('/mcp?');
