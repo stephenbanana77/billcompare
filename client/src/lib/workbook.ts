@@ -355,12 +355,14 @@ async function readPdfTable(file: File): Promise<FileProfile> {
   const headers = headerLine.cells.map((header, index) =>
     header || `列${index + 1}`,
   );
+  // 多页账单后续页会重复打印表头，按表头内容跳过这些行，其余页的数据行全部纳入。
+  const headerKey = headers.map(normalize).join('|');
   const rows = lines
     .filter(
       (line, index) =>
         index > headerLine.index &&
-        line.page === headerLine.page &&
-        line.cells.length >= Math.min(2, headers.length),
+        line.cells.length >= Math.min(2, headers.length) &&
+        line.cells.map(normalize).join('|') !== headerKey,
     )
     .map((line) =>
       Object.fromEntries(
@@ -373,7 +375,7 @@ async function readPdfTable(file: File): Promise<FileProfile> {
   }
   return {
     fileName: file.name,
-    sheetName: `PDF 第 ${headerLine.page} 页`,
+    sheetName: `PDF 第 ${headerLine.page} 页起`,
     headers,
     rows,
     sourceType: 'pdf',
@@ -559,18 +561,28 @@ export function firstColumnValue(profile: FileProfile | null, column: string) {
   return String(profile.rows.find((row) => row[column] !== '')?.[column] ?? '');
 }
 
+// 账单明细常带「合计/总计/小计」行，直接求和会翻倍，需要先剔除；
+// 若剔除后没有明细行（纯汇总单），回退到全部行以保证金额可取。
+const summaryRowPattern = /^\s*(合计|总计|小计|累计)/;
+
+function isSummaryRow(row: WorkbookRow) {
+  return Object.values(row).some(
+    (value) => typeof value === 'string' && summaryRowPattern.test(value),
+  );
+}
+
 export function sumColumn(
   profile: FileProfile | null,
   column: string,
   rows?: WorkbookRow[],
 ): number {
   if (!profile || !column) return 0;
+  const source = rows ?? profile.rows;
+  const detailRows = source.filter((row) => !isSummaryRow(row));
+  const target = detailRows.length ? detailRows : source;
   return (
     Math.round(
-      (rows ?? profile.rows).reduce(
-        (sum, row) => sum + parseMoney(row[column]),
-        0,
-      ) * 100,
+      target.reduce((sum, row) => sum + parseMoney(row[column]), 0) * 100,
     ) / 100
   );
 }

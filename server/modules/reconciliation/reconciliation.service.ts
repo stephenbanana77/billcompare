@@ -59,6 +59,13 @@ const money = (value: unknown): number => {
   return Math.round(parsed * 100) / 100;
 };
 
+const rate = (value: unknown): number => {
+  const parsed = Number(value ?? 0);
+  if (!Number.isFinite(parsed))
+    throw new BadRequestException('扣点率必须是有效数字');
+  return Math.round(parsed * 10000) / 10000;
+};
+
 const requiredText = (value: unknown, label: string): string => {
   const result = String(value ?? '').trim();
   if (!result) throw new BadRequestException(`${label}不能为空`);
@@ -382,7 +389,7 @@ export class ReconciliationService {
     const storeName = requiredText(input.storeName, '门店名称');
     const storeCode = requiredText(input.storeCode, '门店编码');
     const tolerance = Math.abs(money(input.rule?.toleranceAmount));
-    const commissionRate = money(input.rule?.commissionRate);
+    const commissionRate = rate(input.rule?.commissionRate);
     const activityFee = money(input.rule?.activityFee);
     const periodStart = requiredText(input.periodStart, '账期开始日期');
     const periodEnd = requiredText(input.periodEnd, '账期结束日期');
@@ -405,7 +412,7 @@ export class ReconciliationService {
         throw new BadRequestException('所选合同规则不适用于当前商场、门店或账期，请重新匹配');
       }
       if (
-        money(selectedRule.commissionRate) !== commissionRate ||
+        rate(selectedRule.commissionRate) !== commissionRate ||
         money(selectedRule.activityFee) !== activityFee ||
         money(selectedRule.toleranceAmount) !== tolerance
       ) {
@@ -982,7 +989,7 @@ export class ReconciliationService {
       collectionId: collection.id,
       sourceFileName,
       bankReference: requiredText(
-        receipt.bankReference || `ROW-${index + 1}`,
+        receipt.bankReference || `${sourceFileName}#ROW-${index + 1}`,
         '银行流水号',
       ),
       payerName: requiredText(receipt.payerName, '付款方'),
@@ -995,9 +1002,21 @@ export class ReconciliationService {
       .select()
       .from(reconciliationReceipts)
       .where(eq(reconciliationReceipts.collectionId, collection.id));
+    const existingReferences = new Set(
+      existingReceipts.map((receipt) => receipt.bankReference),
+    );
+    const freshReceipts = preparedReceipts.filter(
+      (receipt) => !existingReferences.has(receipt.bankReference),
+    );
+    const skippedDuplicates = preparedReceipts.length - freshReceipts.length;
+    if (!freshReceipts.length) {
+      throw new BadRequestException(
+        '本次导入的流水与已有回款记录重复，未新增任何数据',
+      );
+    }
     const receivedAmount = money(
       existingReceipts.reduce((sum, receipt) => sum + Number(receipt.amount), 0) +
-        preparedReceipts.reduce((sum, receipt) => sum + Number(receipt.amount), 0),
+        freshReceipts.reduce((sum, receipt) => sum + Number(receipt.amount), 0),
     );
     const expectedAmount = money(collection.expectedAmount);
     const tolerance = Math.abs(money(job.ruleSnapshot.toleranceAmount));
@@ -1009,11 +1028,14 @@ export class ReconciliationService {
     );
     const lastReceiptAt = maxDate([
       ...existingReceipts.map((receipt) => receipt.paymentDate),
-      ...preparedReceipts.map((receipt) => receipt.paymentDate),
+      ...freshReceipts.map((receipt) => receipt.paymentDate),
     ]);
 
     await this.db.transaction(async (tx) => {
-      await tx.insert(reconciliationReceipts).values(preparedReceipts);
+      await tx
+        .insert(reconciliationReceipts)
+        .values(freshReceipts)
+        .onConflictDoNothing();
       await tx
         .update(reconciliationCollections)
         .set({
@@ -1032,7 +1054,8 @@ export class ReconciliationService {
         detail: {
           collectionId: collection.id,
           sourceFileName,
-          importedRows: preparedReceipts.length,
+          importedRows: freshReceipts.length,
+          skippedDuplicates,
           receivedAmount,
           expectedAmount,
           status,
@@ -1177,10 +1200,14 @@ export class ReconciliationService {
     dueDate: string | null,
     tolerance: number,
   ): CollectionStatus {
-    if (receivedAmount <= 0) return 'pending';
-    if (Math.abs(receivedAmount - expectedAmount) <= tolerance) return 'matched';
+    if (
+      receivedAmount > 0 &&
+      Math.abs(receivedAmount - expectedAmount) <= tolerance
+    )
+      return 'matched';
     if (receivedAmount > expectedAmount + tolerance) return 'overpaid';
     if (dueDate && dueDate < isoDate()) return 'overdue';
+    if (receivedAmount <= 0) return 'pending';
     return 'partial';
   }
 
@@ -1287,7 +1314,7 @@ export class ReconciliationService {
       effectiveEnd,
       billType: requiredText(input.billType, '账单类型'),
       periodType: requiredText(input.periodType, '账期类型'),
-      commissionRate: String(money(input.commissionRate)),
+      commissionRate: String(rate(input.commissionRate)),
       activityFee: String(money(input.activityFee)),
       toleranceAmount: String(Math.abs(money(input.toleranceAmount))),
       enabled: (input.enabled ?? true) && approvalStatus === 'approved',

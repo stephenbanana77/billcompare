@@ -428,21 +428,30 @@ export const reconciliationCollections = pgTable('reconciliation_collections', {
     .notNull(),
 });
 
-export const reconciliationReceipts = pgTable('reconciliation_receipts', {
-  id: uuid('id').primaryKey(),
-  collectionId: uuid('collection_id')
-    .notNull()
-    .references(() => reconciliationCollections.id, { onDelete: 'cascade' }),
-  sourceFileName: varchar('source_file_name', { length: 255 }).notNull(),
-  bankReference: varchar('bank_reference', { length: 120 }).notNull(),
-  payerName: varchar('payer_name', { length: 160 }).notNull(),
-  paymentDate: varchar('payment_date', { length: 10 }).notNull(),
-  amount: numeric('amount', { precision: 16, scale: 2 }).notNull(),
-  note: text('note'),
-  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
-    .defaultNow()
-    .notNull(),
-});
+export const reconciliationReceipts = pgTable(
+  'reconciliation_receipts',
+  {
+    id: uuid('id').primaryKey(),
+    collectionId: uuid('collection_id')
+      .notNull()
+      .references(() => reconciliationCollections.id, { onDelete: 'cascade' }),
+    sourceFileName: varchar('source_file_name', { length: 255 }).notNull(),
+    bankReference: varchar('bank_reference', { length: 120 }).notNull(),
+    payerName: varchar('payer_name', { length: 160 }).notNull(),
+    paymentDate: varchar('payment_date', { length: 10 }).notNull(),
+    amount: numeric('amount', { precision: 16, scale: 2 }).notNull(),
+    note: text('note'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex('uq_reconciliation_receipts_reference').on(
+      table.collectionId,
+      table.bankReference,
+    ),
+  ],
+);
 
 export const reconciliationVouchers = pgTable('reconciliation_vouchers', {
   id: uuid('id').primaryKey(),

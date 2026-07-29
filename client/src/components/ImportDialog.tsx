@@ -408,22 +408,66 @@ export default function ImportDialog({
     setIsVisionRecognizing(true);
     try {
       const pages = await renderPdfPagesForVision(pendingVisionFile);
-      const result = await reconciliationApi.extractVisionBill(
-        pendingVisionFile.name,
-        pages,
-      );
-      const profile = profileFromVisionExtraction(result);
-      setBillProfile(profile);
-      setBillMap(autoMapping(profile, false));
-      setMeta((current) => ({ ...current, ...result.metadata }));
-      setDetectedMetaCount(
-        Object.values(result.metadata).filter(Boolean).length,
-      );
-      setVisionWarnings(result.warnings);
-      setPendingVisionFile(null);
-      setMappingTemplateId(null);
-      setResolvedTemplateKey('');
-      toast.success('视觉识别完成，请核对识别结果和字段映射。');
+      // 对齐 BillRecognitionPage：视觉识别与 OCR 并行，视觉失败时用 OCR 兜底，避免单点超时直接报错。
+      const [visionAttempt, ocrAttempt] = await Promise.allSettled([
+        reconciliationApi.extractVisionBill(pendingVisionFile.name, pages),
+        reconciliationApi.extractOcrBill(pages),
+      ]);
+      if (visionAttempt.status === 'fulfilled') {
+        const result = visionAttempt.value;
+        const profile = profileFromVisionExtraction(result);
+        setBillProfile(profile);
+        setBillMap(autoMapping(profile, false));
+        setMeta((current) => ({ ...current, ...result.metadata }));
+        setDetectedMetaCount(
+          Object.values(result.metadata).filter(Boolean).length,
+        );
+        setVisionWarnings(result.warnings);
+        setPendingVisionFile(null);
+        setMappingTemplateId(null);
+        setResolvedTemplateKey('');
+        if (ocrAttempt.status === 'rejected') {
+          toast.warning('OCR 校验未完成，识别结果请人工复核后再继续。');
+        } else {
+          toast.success('视觉识别完成，请核对识别结果和字段映射。');
+        }
+      } else if (ocrAttempt.status === 'fulfilled') {
+        // 视觉识别失败但 OCR 成功：用 OCR 字段构造最小 profile，让用户能继续后续字段映射，不必重新识别。
+        const ocr = ocrAttempt.value;
+        const ocrHeaders = ['商场名称', '门店编码', '销售金额', '发票金额', '扣款费用合计', '实结金额'];
+        const ocrRow: Record<string, string | number> = {
+          商场名称: ocr.fields.mallName?.value ?? '',
+          门店编码: ocr.fields.storeCode?.value ?? '',
+          销售金额: ocr.fields.salesAmount?.value ?? '',
+          发票金额: ocr.fields.invoiceAmount?.value ?? '',
+          扣款费用合计: ocr.fields.deductionTotal?.value ?? '',
+          实结金额: ocr.fields.settlementAmount?.value ?? '',
+        };
+        const profile: FileProfile = {
+          fileName: pendingVisionFile.name,
+          sheetName: 'OCR 兜底结果',
+          headers: ocrHeaders,
+          rows: [ocrRow],
+          sourceType: 'vision_llm',
+        };
+        setBillProfile(profile);
+        setBillMap(autoMapping(profile, false));
+        setMeta((current) => ({
+          ...current,
+          mallName: ocr.fields.mallName?.value ?? current.mallName,
+          storeCode: ocr.fields.storeCode?.value ?? current.storeCode,
+        }));
+        setDetectedMetaCount(0);
+        setVisionWarnings([
+          '视觉识别未完成，已用 OCR 结果兜底。字段映射与金额请人工核对后再继续。',
+        ]);
+        setPendingVisionFile(null);
+        setMappingTemplateId(null);
+        setResolvedTemplateKey('');
+        toast.warning('视觉识别未完成，已用 OCR 结果兜底，请仔细核对字段映射。');
+      } else {
+        throw visionAttempt.reason;
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '视觉识别失败，请重试。');
     } finally {
