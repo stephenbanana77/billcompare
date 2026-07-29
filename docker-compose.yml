@@ -1,0 +1,48 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: billcompare-app
+    restart: unless-stopped
+    env_file:
+      - .env.deploy
+    environment:
+      NODE_ENV: development
+      MIAODA_LOCAL_DEV: "1"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "3001"
+      LAN_HOST: 0.0.0.0
+      LAN_PORT: "5176"
+    ports:
+      - "5176:5176"
+      - "3001:3001"
+    command: ["node", "scripts/dev-windows-lan.js"]
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: billcompare-mcp
+    restart: unless-stopped
+    env_file:
+      - .env.deploy
+    environment:
+      CHERRY_MCP_HOST: 0.0.0.0
+      CHERRY_MCP_PORT: "8791"
+      CHERRY_MCP_ENDPOINT: /mcp
+      MALL_RECONCILIATION_MCP_SOURCE: database
+    ports:
+      - "8791:8791"
+    command: ["node", "scripts/cherry-studio-mcp-http-server.mjs"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8791/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
