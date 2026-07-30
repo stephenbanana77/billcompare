@@ -206,6 +206,14 @@ const server = http.createServer(async (req, res) => {
   const isMcp = originalUrl === '/mcp' || originalUrl.startsWith('/mcp?');
   const isMcpHealth = originalUrl === '/mcp-health';
   const targetPort = isMcp || isMcpHealth ? mcpPort : appPort;
+  const isDirectApi =
+    requestUrl.pathname === '/api' || requestUrl.pathname.startsWith('/api/');
+  const isAppPrefixedApi =
+    requestUrl.pathname === `${appBasePath}/api` ||
+    requestUrl.pathname.startsWith(`${appBasePath}/api/`);
+  const placeholderApiPath = requestUrl.pathname.match(
+    /^\/app\/(?:null|undefined)?(\/api(?:\/.*)?$)/,
+  );
   const placeholderAppPath = requestUrl.pathname.match(
     /^\/app\/(?:null|undefined)?\/(.*)$/,
   );
@@ -213,12 +221,15 @@ const server = http.createServer(async (req, res) => {
     ? '/health'
     : isHtmlNavigation
       ? `${appBasePath}${requestUrl.pathname}${requestUrl.search}`
-      : placeholderAppPath
-        ? `${appBasePath}/${placeholderAppPath[1]}${requestUrl.search}`
-        : requestUrl.pathname === '/api' ||
-            requestUrl.pathname.startsWith('/api/')
-          ? `${appBasePath}${requestUrl.pathname}${requestUrl.search}`
-          : originalUrl;
+      : isAppPrefixedApi
+        ? `${requestUrl.pathname.slice(appBasePath.length)}${requestUrl.search}`
+        : placeholderApiPath
+          ? `${placeholderApiPath[1]}${requestUrl.search}`
+          : isDirectApi
+            ? originalUrl
+            : placeholderAppPath
+              ? `${appBasePath}/${placeholderAppPath[1]}${requestUrl.search}`
+              : originalUrl;
 
   const proxy = http.request(
     {
@@ -234,7 +245,8 @@ const server = http.createServer(async (req, res) => {
     (proxyRes) => {
       const responseHeaders = { ...proxyRes.headers };
       if (proxyRes.headers['content-type']?.includes('text/html')) {
-        responseHeaders['cache-control'] = 'no-store, no-cache, must-revalidate';
+        responseHeaders['cache-control'] =
+          'no-store, no-cache, must-revalidate';
         responseHeaders.pragma = 'no-cache';
         responseHeaders.expires = '0';
       }
@@ -250,7 +262,8 @@ const server = http.createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         error: 'Bad Gateway',
-        message: error instanceof Error ? error.message : 'upstream unavailable',
+        message:
+          error instanceof Error ? error.message : 'upstream unavailable',
       }),
     );
   });

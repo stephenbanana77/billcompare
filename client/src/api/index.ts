@@ -133,7 +133,8 @@ const demoIssues: ReconciliationIssueRow[] = [
       type: 'commission_difference',
       severity: 'medium',
       title: '扣点金额差异 多计 ¥400.00',
-      description: '商场账单扣点为 ¥11800.00，系统依据 ERP 与规则计算为 ¥11400.00。',
+      description:
+        '商场账单扣点为 ¥11800.00，系统依据 ERP 与规则计算为 ¥11400.00。',
       differenceAmount: '400.00',
       status: 'open',
       suggestedAction: '复核扣点比例及计提基数，必要时依据合同向商场发起申诉。',
@@ -340,9 +341,25 @@ async function request<T>(config: AxiosRequestConfig): Promise<T> {
   } catch (error) {
     const fallback = localFallback<T>(config);
     if (fallback !== undefined) return fallback;
-    const response = (error as { response?: { data?: { error?: { message?: string } } } })?.response;
-    const message = response?.data?.error?.message;
-    throw new Error(message || (error instanceof Error ? error.message : '请求失败'));
+    const response = (
+      error as {
+        response?: {
+          data?: {
+            message?: string | string[];
+            error?: { message?: string } | string;
+          };
+        };
+      }
+    )?.response;
+    const responseMessage = response?.data?.message;
+    const nestedError = response?.data?.error;
+    const message = Array.isArray(responseMessage)
+      ? responseMessage.join('；')
+      : responseMessage ||
+        (typeof nestedError === 'object' ? nestedError?.message : undefined);
+    throw new Error(
+      message || (error instanceof Error ? error.message : '请求失败'),
+    );
   }
 }
 
@@ -358,11 +375,12 @@ export const reconciliationApi = {
     periodStart?: string;
     periodEnd?: string;
     includeHistory?: boolean;
-  }) => request<ConfirmedSettlementBill[]>({
-    url: '/api/reconciliation/confirmed-settlements',
-    method: 'GET',
-    params,
-  }),
+  }) =>
+    request<ConfirmedSettlementBill[]>({
+      url: '/api/reconciliation/confirmed-settlements',
+      method: 'GET',
+      params,
+    }),
   confirmedSettlement: (id: string) =>
     request<ConfirmedSettlementDetail>({
       url: `/api/reconciliation/confirmed-settlements/${id}`,
@@ -387,7 +405,10 @@ export const reconciliationApi = {
       data: formData,
     });
   },
-  refineVisionBill: (candidates: VisionRefinementCandidate[], tiles: File[]) => {
+  refineVisionBill: (
+    candidates: VisionRefinementCandidate[],
+    tiles: File[],
+  ) => {
     const formData = new FormData();
     formData.append('candidates', JSON.stringify(candidates));
     tiles.forEach((tile) => formData.append('tiles', tile));

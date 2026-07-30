@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -12,8 +12,14 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { CreateJobInput, FieldMapping } from '@shared/reconciliation';
+import type {
+  CreateJobInput,
+  FieldMapping,
+  VisionExtractionResult,
+} from '@shared/reconciliation';
 import { reconciliationApi } from '@/api';
+import { recognizeSettlementPdf } from '@/lib/settlement-pdf-recognition';
+import { profileFromVisionExtraction } from '@/lib/vision-profile';
 import {
   createHeaderSignature,
   filterRowsByDate,
@@ -21,9 +27,7 @@ import {
   guessColumn,
   inferBillMetadata,
   inferStoreCode,
-  profileFromVisionExtraction,
   readWorkbook,
-  renderPdfPagesForVision,
   sumColumn,
   type FileProfile,
 } from '@/lib/workbook';
@@ -99,8 +103,13 @@ export default function ImportDialog({
   const [resolvedContractKey, setResolvedContractKey] = useState('');
   const [detectedMetaCount, setDetectedMetaCount] = useState(0);
   const [pendingVisionFile, setPendingVisionFile] = useState<File | null>(null);
+  const [visionExtraction, setVisionExtraction] =
+    useState<VisionExtractionResult | null>(null);
   const [visionWarnings, setVisionWarnings] = useState<string[]>([]);
+  const [visionError, setVisionError] = useState<string | null>(null);
+  const [visionStatus, setVisionStatus] = useState('');
   const [isVisionRecognizing, setIsVisionRecognizing] = useState(false);
+  const visionRequestId = useRef(0);
   const [meta, setMeta] = useState({
     mallName: '',
     storeName: '',
@@ -142,14 +151,19 @@ export default function ImportDialog({
 
   const applicableRules = useMemo(() => {
     const normalize = (value: string | null | undefined) =>
-      String(value ?? '').trim().toLowerCase().replace(/\s/g, '');
+      String(value ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s/g, '');
     const mallName = normalize(meta.mallName);
     const storeCode = normalize(meta.storeCode);
     if (!mallName || !meta.periodStart || !meta.periodEnd) return [];
     return rules
       .filter((item) => {
-        const mallMatches = !item.mallName || normalize(item.mallName) === mallName;
-        const storeMatches = !item.storeCode || normalize(item.storeCode) === storeCode;
+        const mallMatches =
+          !item.mallName || normalize(item.mallName) === mallName;
+        const storeMatches =
+          !item.storeCode || normalize(item.storeCode) === storeCode;
         const typeMatches = item.billType === meta.billType;
         const dateMatches =
           (!item.effectiveStart || item.effectiveStart <= meta.periodStart) &&
@@ -164,11 +178,24 @@ export default function ImportDialog({
         );
       })
       .sort((left, right) => {
-        const leftScore = Number(Boolean(left.storeCode)) * 2 + Number(Boolean(left.mallName));
-        const rightScore = Number(Boolean(right.storeCode)) * 2 + Number(Boolean(right.mallName));
-        return rightScore - leftScore || right.updatedAt.localeCompare(left.updatedAt);
+        const leftScore =
+          Number(Boolean(left.storeCode)) * 2 + Number(Boolean(left.mallName));
+        const rightScore =
+          Number(Boolean(right.storeCode)) * 2 +
+          Number(Boolean(right.mallName));
+        return (
+          rightScore - leftScore ||
+          right.updatedAt.localeCompare(left.updatedAt)
+        );
       });
-  }, [meta.billType, meta.mallName, meta.periodEnd, meta.periodStart, meta.storeCode, rules]);
+  }, [
+    meta.billType,
+    meta.mallName,
+    meta.periodEnd,
+    meta.periodStart,
+    meta.storeCode,
+    rules,
+  ]);
   const autoMatchedRule = applicableRules[0];
 
   useEffect(() => {
@@ -226,7 +253,12 @@ export default function ImportDialog({
       meta.periodEnd,
       rules.map((item) => `${item.id}:${item.updatedAt}`).join(','),
     ].join('|');
-    if (!meta.mallName || !meta.periodStart || !meta.periodEnd || key === resolvedContractKey) {
+    if (
+      !meta.mallName ||
+      !meta.periodStart ||
+      !meta.periodEnd ||
+      key === resolvedContractKey
+    ) {
       return;
     }
     setResolvedContractKey(key);
@@ -318,8 +350,11 @@ export default function ImportDialog({
     billPeriodStart === meta.periodStart &&
     billPeriodEnd === meta.periodEnd,
   );
+  const dynamicFieldCount = visionExtraction?.dynamicFields?.length ?? 0;
+  const formulaCheckCount = visionExtraction?.formulaChecks?.length ?? 0;
 
   const reset = () => {
+    visionRequestId.current += 1;
     setStep(1);
     setBillProfile(null);
     setErpProfile(null);
@@ -334,7 +369,10 @@ export default function ImportDialog({
     setResolvedContractKey('');
     setDetectedMetaCount(0);
     setPendingVisionFile(null);
+    setVisionExtraction(null);
     setVisionWarnings([]);
+    setVisionError(null);
+    setVisionStatus('');
     setIsVisionRecognizing(false);
     setMeta({
       mallName: '',
@@ -360,9 +398,28 @@ export default function ImportDialog({
 
   const handleFile = async (file: File | undefined, target: 'bill' | 'erp') => {
     if (!file) return;
+    if (target === 'bill' && file.name.toLowerCase().endsWith('.pdf')) {
+      visionRequestId.current += 1;
+      setPendingVisionFile(file);
+      setVisionExtraction(null);
+      setVisionWarnings([]);
+      setVisionError(null);
+      setVisionStatus('');
+      setIsVisionRecognizing(false);
+      setBillProfile(null);
+      setBillMap(emptyMapping);
+      setMappingTemplateId(null);
+      setResolvedTemplateKey('');
+      toast.info('PDF 结算单将使用统一视觉识别流程处理。');
+      return;
+    }
     try {
       const profile = await readWorkbook(file);
       if (target === 'bill') {
+        setPendingVisionFile(null);
+        setVisionExtraction(null);
+        setVisionWarnings([]);
+        setVisionError(null);
         const detected = inferBillMetadata(profile);
         setBillProfile(profile);
         setBillMap(autoMapping(profile, false));
@@ -394,84 +451,61 @@ export default function ImportDialog({
       setMappingTemplateId(null);
       setResolvedTemplateKey('');
     } catch (error) {
-      if (target === 'bill' && file.name.toLowerCase().endsWith('.pdf')) {
-        setPendingVisionFile(file);
-        toast.error('该 PDF 未包含可识别文字表格，可使用视觉识别继续处理。');
-        return;
-      }
       toast.error(error instanceof Error ? error.message : '文件读取失败');
     }
   };
 
   const handleVisionRecognition = async () => {
     if (!pendingVisionFile) return;
+    const file = pendingVisionFile;
+    const requestId = visionRequestId.current + 1;
+    visionRequestId.current = requestId;
     setIsVisionRecognizing(true);
+    setVisionError(null);
+    setVisionWarnings([]);
     try {
-      const pages = await renderPdfPagesForVision(pendingVisionFile);
-      // 对齐 BillRecognitionPage：视觉识别与 OCR 并行，视觉失败时用 OCR 兜底，避免单点超时直接报错。
-      const [visionAttempt, ocrAttempt] = await Promise.allSettled([
-        reconciliationApi.extractVisionBill(pendingVisionFile.name, pages),
-        reconciliationApi.extractOcrBill(pages),
-      ]);
-      if (visionAttempt.status === 'fulfilled') {
-        const result = visionAttempt.value;
-        const profile = profileFromVisionExtraction(result);
-        setBillProfile(profile);
-        setBillMap(autoMapping(profile, false));
-        setMeta((current) => ({ ...current, ...result.metadata }));
-        setDetectedMetaCount(
-          Object.values(result.metadata).filter(Boolean).length,
-        );
-        setVisionWarnings(result.warnings);
-        setPendingVisionFile(null);
-        setMappingTemplateId(null);
-        setResolvedTemplateKey('');
-        if (ocrAttempt.status === 'rejected') {
-          toast.warning('OCR 校验未完成，识别结果请人工复核后再继续。');
-        } else {
-          toast.success('视觉识别完成，请核对识别结果和字段映射。');
-        }
-      } else if (ocrAttempt.status === 'fulfilled') {
-        // 视觉识别失败但 OCR 成功：用 OCR 字段构造最小 profile，让用户能继续后续字段映射，不必重新识别。
-        const ocr = ocrAttempt.value;
-        const ocrHeaders = ['商场名称', '门店编码', '销售金额', '发票金额', '扣款费用合计', '实结金额'];
-        const ocrRow: Record<string, string | number> = {
-          商场名称: ocr.fields.mallName?.value ?? '',
-          门店编码: ocr.fields.storeCode?.value ?? '',
-          销售金额: ocr.fields.salesAmount?.value ?? '',
-          发票金额: ocr.fields.invoiceAmount?.value ?? '',
-          扣款费用合计: ocr.fields.deductionTotal?.value ?? '',
-          实结金额: ocr.fields.settlementAmount?.value ?? '',
-        };
-        const profile: FileProfile = {
-          fileName: pendingVisionFile.name,
-          sheetName: 'OCR 兜底结果',
-          headers: ocrHeaders,
-          rows: [ocrRow],
-          sourceType: 'vision_llm',
-        };
-        setBillProfile(profile);
-        setBillMap(autoMapping(profile, false));
-        setMeta((current) => ({
-          ...current,
-          mallName: ocr.fields.mallName?.value ?? current.mallName,
-          storeCode: ocr.fields.storeCode?.value ?? current.storeCode,
-        }));
-        setDetectedMetaCount(0);
-        setVisionWarnings([
-          '视觉识别未完成，已用 OCR 结果兜底。字段映射与金额请人工核对后再继续。',
-        ]);
-        setPendingVisionFile(null);
-        setMappingTemplateId(null);
-        setResolvedTemplateKey('');
-        toast.warning('视觉识别未完成，已用 OCR 结果兜底，请仔细核对字段映射。');
-      } else {
-        throw visionAttempt.reason;
-      }
+      const { extraction, ocrWarning } = await recognizeSettlementPdf(
+        file,
+        (stage) => {
+          if (visionRequestId.current !== requestId) return;
+          setVisionStatus(
+            stage === 'rendering'
+              ? '正在渲染 PDF 页面...'
+              : stage === 'recognizing'
+                ? '正在识别汇总字段、动态字段和明细...'
+                : '正在整理识别结果...',
+          );
+        },
+      );
+      if (visionRequestId.current !== requestId) return;
+      const profile = profileFromVisionExtraction(extraction);
+      setBillProfile(profile);
+      setBillMap(autoMapping(profile, false));
+      setMeta((current) => ({ ...current, ...extraction.metadata }));
+      setDetectedMetaCount(
+        Object.values(extraction.metadata).filter(Boolean).length,
+      );
+      setVisionExtraction(extraction);
+      setVisionWarnings(
+        ocrWarning ? [...extraction.warnings, ocrWarning] : extraction.warnings,
+      );
+      setPendingVisionFile(null);
+      setMappingTemplateId(null);
+      setResolvedTemplateKey('');
+      setVisionStatus('');
+      if (ocrWarning) toast.warning(ocrWarning);
+      else toast.success('统一视觉识别完成，请核对识别结果和字段映射。');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '视觉识别失败，请重试。');
+      if (visionRequestId.current !== requestId) return;
+      const message =
+        error instanceof Error ? error.message : '视觉识别失败，请重试。';
+      setVisionError(message);
+      setVisionStatus('');
+      toast.error(message);
     } finally {
-      setIsVisionRecognizing(false);
+      if (visionRequestId.current === requestId) {
+        setIsVisionRecognizing(false);
+      }
     }
   };
 
@@ -613,23 +647,41 @@ export default function ImportDialog({
                 <div className="metadata-detected">
                   <AlertTriangle size={18} />
                   <div>
-                    <strong>检测到扫描版 PDF：{pendingVisionFile.name}</strong>
-                    <p>页面图片将发送至已配置的视觉模型进行识别，识别后仍需人工确认。</p>
+                    <strong>已选择 PDF 结算单：{pendingVisionFile.name}</strong>
+                    <p>
+                      此入口与“结算单识别”共用动态字段、明细和公式识别流程，结果仍需人工核对。
+                    </p>
                     <button
                       type="button"
                       className="secondary-button"
                       onClick={handleVisionRecognition}
                       disabled={isVisionRecognizing}
                     >
-                      {isVisionRecognizing ? '正在进行视觉识别...' : '使用视觉识别'}
+                      {isVisionRecognizing
+                        ? visionStatus || '正在进行统一视觉识别...'
+                        : visionError
+                          ? '重试统一视觉识别'
+                          : '开始统一视觉识别'}
                     </button>
+                  </div>
+                </div>
+              )}
+              {visionError && (
+                <div className="validation-banner error">
+                  <AlertTriangle size={17} />
+                  <div>
+                    <strong>视觉识别未完成</strong>
+                    <p>{visionError} 文件已保留，可直接点击上方按钮重试。</p>
                   </div>
                 </div>
               )}
               {visionWarnings.length > 0 && (
                 <div className="warning-list">
                   {visionWarnings.map((warning) => (
-                    <p key={warning}><AlertTriangle size={15} />{warning}</p>
+                    <p key={warning}>
+                      <AlertTriangle size={15} />
+                      {warning}
+                    </p>
                   ))}
                 </div>
               )}
@@ -638,7 +690,12 @@ export default function ImportDialog({
                   <CheckCircle2 size={18} />
                   <div>
                     <strong>已从账单预填 {detectedMetaCount} 项基础信息</strong>
-                    <p>请核对商场、门店、账期和账单类型，识别不准确时可直接修改。</p>
+                    <p>
+                      请核对商场、门店、账期和账单类型，识别不准确时可直接修改。
+                      {visionExtraction
+                        ? ` 已并入 ${dynamicFieldCount} 个动态字段、${formulaCheckCount} 条公式校验。`
+                        : ''}
+                    </p>
                   </div>
                 </div>
               )}
@@ -831,10 +888,10 @@ export default function ImportDialog({
                   >
                     <option value="manual">临时规则（不保存）</option>
                     {applicableRules.map((item) => (
-                        <option value={item.id} key={item.id}>
-                          {item.name}
-                          {item.contractNo ? ` · ${item.contractNo}` : ''}
-                        </option>
+                      <option value={item.id} key={item.id}>
+                        {item.name}
+                        {item.contractNo ? ` · ${item.contractNo}` : ''}
+                      </option>
                     ))}
                   </select>
                 </label>
@@ -914,12 +971,13 @@ export default function ImportDialog({
                   className={`rule-check ${Math.abs(ruleDifference) > rule.toleranceAmount ? 'warning' : 'ok'}`}
                 >
                   <div>
-                    <strong>{selectedRule ? '合同规则已匹配' : '扣点口径核对'}</strong>
+                    <strong>
+                      {selectedRule ? '合同规则已匹配' : '扣点口径核对'}
+                    </strong>
                     <p>
                       {selectedRule
                         ? `${selectedRule.contractNo || '未编号合同'}${selectedRule.contractVersion ? ` ${selectedRule.contractVersion}` : ''}，${selectedRule.effectiveStart || '起始不限'} 至 ${selectedRule.effectiveEnd || '结束不限'}。`
-                        : ''}
-                      {' '}
+                        : ''}{' '}
                       账单金额推算约 {impliedCommissionRate.toFixed(2)}
                       %，当前规则为{' '}
                       {manualRateProvided

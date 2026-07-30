@@ -39,9 +39,21 @@ const ocrFieldDefinitions: Array<{
 }> = [
   { key: 'mallName', label: /^(?!.*预览)(?=.*(?:购物中心|商场|广场|百货)).+$/, direction: 'self' },
   { key: 'settlementNo', label: /结算单号/, direction: 'inline-right' },
-  { key: 'brandMerchantName', label: /品牌商名称/, direction: 'inline-right' },
-  { key: 'brandName', label: /^品牌[：:]/, direction: 'inline-right' },
-  { key: 'storeCode', label: /^(代码|柜号|门店编码)[：:]/, direction: 'inline-right' },
+  {
+    key: 'brandMerchantName',
+    label: /^(品牌商名称|供货商名称)[：:]/,
+    direction: 'inline-right',
+  },
+  {
+    key: 'brandName',
+    label: /^(品牌|专柜名称)[：:]/,
+    direction: 'inline-right',
+  },
+  {
+    key: 'storeCode',
+    label: /^(代码|柜号|门店编码|专柜编码)[：:]/,
+    direction: 'inline-right',
+  },
   { key: 'settlementDate', label: /^结算日期[：:]?$/, direction: 'inline-right' },
   { key: 'documentDate', label: /^制单日期[：:]?$/, direction: 'inline-right' },
   { key: 'salesQuantity', label: /^销售数量$/, direction: 'below' },

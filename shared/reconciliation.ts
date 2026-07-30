@@ -1,3 +1,8 @@
+import type {
+  SettlementFormula,
+  SettlementFormulaValidationResult,
+} from './settlement-formula';
+
 export type JobStatus = 'matched' | 'needs_review' | 'resolved';
 export type IssueStatus =
   | 'open'
@@ -91,6 +96,43 @@ export interface VisionAdditionalField extends VisionFieldEvidence {
   label: string;
   group: 'header' | 'summary' | 'fee' | 'other';
   suggestedTarget?: string | null;
+}
+
+export type VisionDynamicFieldValueType =
+  | 'money'
+  | 'percent'
+  | 'date'
+  | 'date_range'
+  | 'number'
+  | 'identifier'
+  | 'text';
+
+/**
+ * Evidence-backed field extracted from an arbitrary mall statement.
+ * `role` is an optional semantic hint; the original label is always retained.
+ */
+export interface VisionDynamicField extends VisionFieldEvidence {
+  id: string;
+  label: string;
+  group: 'metadata' | 'summary' | 'fee' | 'detail' | 'formula' | 'other';
+  role?: string | null;
+  valueType?: VisionDynamicFieldValueType | null;
+  section?: string | null;
+}
+
+/** A safe, data-only formula bound to dynamic field ids and evaluated by code. */
+export interface VisionFormulaCheck {
+  id: string;
+  label: string;
+  expression: string;
+  formula: SettlementFormula;
+  expected: SettlementFormula | number;
+  fieldValues: Record<string, string | number | null>;
+  sourceText: string | null;
+  page: number | null;
+  tolerance?: number;
+  status: 'passed' | 'failed' | 'review';
+  validation: SettlementFormulaValidationResult;
 }
 
 export interface VisionLineItem {
@@ -204,6 +246,10 @@ export interface VisionExtractionResult {
   evidence: Partial<Record<VisionFieldKey, VisionFieldEvidence>>;
   additionalFields: VisionAdditionalField[];
   lineItems: VisionLineItem[];
+  /** Optional for backward compatibility with already-confirmed records. */
+  dynamicFields?: VisionDynamicField[];
+  /** Optional for backward compatibility with already-confirmed records. */
+  formulaChecks?: VisionFormulaCheck[];
   warnings: string[];
 }
 

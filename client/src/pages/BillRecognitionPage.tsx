@@ -1,11 +1,14 @@
-import { useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   BadgeCheck,
   Check,
   FileSearch,
+  History,
   LoaderCircle,
   Plus,
+  RefreshCw,
+  RotateCcw,
   TableProperties,
   Upload,
   X,
@@ -13,6 +16,7 @@ import {
 import { toast } from 'sonner';
 import type {
   VisionAdditionalField,
+  VisionDynamicField,
   VisionExtractionResult,
   VisionFieldKey,
   VisionLineItem,
@@ -21,10 +25,12 @@ import type {
   OcrFieldEvidence,
   OcrKeyFieldKey,
   OcrPageResult,
+  ConfirmedSettlementBill,
   ConfirmedSettlementDetail,
 } from '@shared/reconciliation';
 import { reconciliationApi } from '@/api';
-import { renderPdfPagesForVision, renderPdfTilesForVision } from '@/lib/workbook';
+import { renderPdfTilesForVision } from '@/lib/workbook';
+import { recognizeSettlementPdf } from '@/lib/settlement-pdf-recognition';
 import {
   confirmedMetadataTargets,
   createSettlementRequestCoordinator,
@@ -33,7 +39,10 @@ import {
   mapConfirmedReviewedValues,
   persistSettlementConfirmation,
 } from '@/lib/settlement-confirmation';
-import { collectVisionRefinementCandidates, indexVisionRefinements } from '@shared/vision-refinement';
+import {
+  collectVisionRefinementCandidates,
+  indexVisionRefinements,
+} from '@shared/vision-refinement';
 
 type MappingTarget =
   | ''
@@ -142,20 +151,81 @@ function metadataRow(
 function additionalRow(field: VisionAdditionalField, index: number): ReviewRow {
   const target = inferAdditionalTarget(field);
   const additionalTargets = new Set<MappingTarget>([
-    'businessMode', 'counterLocation', 'productCategory', 'settlementDate', 'documentDate', 'printSequence', 'previousBalance',
+    'businessMode',
+    'counterLocation',
+    'productCategory',
+    'settlementDate',
+    'documentDate',
+    'printSequence',
+    'previousBalance',
   ]);
   return {
     id: `additional:${index}`,
-    source: field.rawText || `${field.label}${field.value === null ? '' : `：${field.value}`}`,
-    evidence: `第 ${field.page ?? '-'} 页 · ${field.group === 'summary' ? '汇总区' : field.group === 'fee' ? '费用区' : '原始字段'}`,
+    source: field.label || field.rawText || `动态字段 ${index + 1}`,
+    evidence: [
+      `第 ${field.page ?? '-'} 页`,
+      field.group === 'summary'
+        ? '汇总区'
+        : field.group === 'fee'
+          ? '费用区'
+          : `${field.group || 'other'} 字段`,
+      field.rawText && field.rawText !== field.label
+        ? `原文：${field.rawText}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' · '),
     confidence: field.confidence,
     target,
     value: field.value === null ? '' : String(field.value),
-    group: additionalTargets.has(target)
-      ? 'additional'
-      : target
-        ? (field.group === 'summary' ? 'summary' : 'basic')
-        : 'unmapped',
+    group:
+      field.group === 'summary'
+        ? 'summary'
+        : additionalTargets.has(target)
+          ? 'additional'
+          : target
+            ? 'basic'
+            : 'unmapped',
+  };
+}
+
+function dynamicFieldRow(field: VisionDynamicField, index: number): ReviewRow {
+  const target = knownTargets.has(field.role as MappingTarget)
+    ? (field.role as MappingTarget)
+    : '';
+  const additionalTargets = new Set<MappingTarget>([
+    'businessMode',
+    'counterLocation',
+    'productCategory',
+    'settlementDate',
+    'documentDate',
+    'printSequence',
+    'previousBalance',
+  ]);
+  return {
+    id: field.id || `dynamic:${index}`,
+    source: field.label || `动态字段 ${index + 1}`,
+    evidence: [
+      `第 ${field.page ?? '-'} 页`,
+      field.section || `${field.group || 'other'} 字段`,
+      field.valueType ? `类型：${field.valueType}` : '',
+      field.rawText && field.rawText !== field.label
+        ? `原文：${field.rawText}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' · '),
+    confidence: field.confidence,
+    target,
+    value: field.value === null ? '' : String(field.value),
+    group:
+      field.group === 'summary' || field.group === 'formula'
+        ? 'summary'
+        : additionalTargets.has(target)
+          ? 'additional'
+          : target
+            ? 'basic'
+            : 'unmapped',
   };
 }
 
@@ -163,14 +233,21 @@ function mergeFeeLineItems(result: VisionExtractionResult): VisionLineItem[] {
   const items = [...result.lineItems];
   const feeKey = (label: string, value: string | number | null) =>
     `${label.replace(/\s/g, '').replace(/[~～-]\d{4}\s*$/, '')}|${String(value ?? '').replace(/[,，\s]/g, '')}`;
-  const existing = new Set(items.map((item) => feeKey(
-    item.label,
-    item.values['金额'] ?? item.values['费用金额'] ?? null,
-  )));
+  const existing = new Set(
+    items.map((item) =>
+      feeKey(
+        item.label,
+        item.values['金额'] ?? item.values['费用金额'] ?? null,
+      ),
+    ),
+  );
 
-  for (const field of result.additionalFields.filter((item) => item.group === 'fee')) {
+  for (const field of result.additionalFields.filter(
+    (item) => item.group === 'fee',
+  )) {
     const normalizedLabel = field.label.replace(/[~～-]\d{4}\s*$/, '').trim();
-    if (!normalizedLabel || field.value === null || field.value === '') continue;
+    if (!normalizedLabel || field.value === null || field.value === '')
+      continue;
     const key = feeKey(field.label, field.value);
     if (existing.has(key)) continue;
     const code = field.label.match(/[~～-](\d{4})\s*$/)?.[1] ?? null;
@@ -209,46 +286,113 @@ function buildReviewRows(result: VisionExtractionResult): ReviewRow[] {
   const periodSource = result.periodEvidence.rawText;
   const periodIsExplicit = result.periodEvidence.kind === 'explicit_range';
   const metadataRows = [
-    metadataRow('商场名称', result.metadata.mallName, confirmedMetadataTargets.mallName, 'AI 从单据页眉识别'),
-    metadataRow('品牌 / 门店', result.metadata.storeName, confirmedMetadataTargets.storeName, 'AI 从单据页眉识别'),
-    metadataRow('柜号 / 门店编码', result.metadata.storeCode, confirmedMetadataTargets.storeCode, 'AI 从单据页眉识别'),
+    metadataRow(
+      '商场名称',
+      result.metadata.mallName,
+      confirmedMetadataTargets.mallName,
+      'AI 从单据页眉识别',
+    ),
+    metadataRow(
+      '品牌 / 门店',
+      result.metadata.storeName,
+      confirmedMetadataTargets.storeName,
+      'AI 从单据页眉识别',
+    ),
+    metadataRow(
+      '柜号 / 门店编码',
+      result.metadata.storeCode,
+      confirmedMetadataTargets.storeCode,
+      'AI 从单据页眉识别',
+    ),
     metadataRow(
       periodSource || '未返回账期原文',
       result.metadata.periodStart,
       confirmedMetadataTargets.periodStart,
-      periodIsExplicit ? `第 ${result.periodEvidence.page ?? '-'} 页 · 原文日期范围` : 'PDF 未显示 5 月 1 日；系统按结算月份推导当月首日',
+      periodIsExplicit
+        ? `第 ${result.periodEvidence.page ?? '-'} 页 · 原文日期范围`
+        : 'PDF 未显示 5 月 1 日；系统按结算月份推导当月首日',
       !periodIsExplicit,
     ),
     metadataRow(
       periodSource || '未返回账期原文',
       result.metadata.periodEnd,
       confirmedMetadataTargets.periodEnd,
-      periodIsExplicit ? `第 ${result.periodEvidence.page ?? '-'} 页 · 原文日期范围` : '系统按结算月份推导当月末日，并与结算日期交叉核对',
+      periodIsExplicit
+        ? `第 ${result.periodEvidence.page ?? '-'} 页 · 原文日期范围`
+        : '系统按结算月份推导当月末日，并与结算日期交叉核对',
       !periodIsExplicit,
     ),
   ];
-  const amountRows = (Object.entries(result.evidence) as Array<
-    [VisionFieldKey, NonNullable<VisionExtractionResult['evidence'][VisionFieldKey]>]
-  >)
-    .filter(([key, evidence]) => !['periodStart', 'periodEnd'].includes(key) && (evidence?.rawText || evidence?.value !== null))
-    .map(([key, evidence]): ReviewRow => ({
-      id: `field:${key}`,
-      source: evidence.rawText || fieldNames[key],
-      evidence: `第 ${evidence.page ?? '-'} 页 · 结算汇总区`,
-      confidence: evidence.confidence,
-      target: key as MappingTarget,
-      value: evidence.value === null ? '' : String(evidence.value),
-      group: 'summary',
-    }));
+  const amountRows = (
+    Object.entries(result.evidence) as Array<
+      [
+        VisionFieldKey,
+        NonNullable<VisionExtractionResult['evidence'][VisionFieldKey]>,
+      ]
+    >
+  )
+    .filter(
+      ([key, evidence]) =>
+        !['periodStart', 'periodEnd'].includes(key) &&
+        (evidence?.rawText || evidence?.value !== null),
+    )
+    .map(
+      ([key, evidence]): ReviewRow => ({
+        id: `field:${key}`,
+        source: evidence.rawText || fieldNames[key],
+        evidence: `第 ${evidence.page ?? '-'} 页 · 结算汇总区`,
+        confidence: evidence.confidence,
+        target: key as MappingTarget,
+        value: evidence.value === null ? '' : String(evidence.value),
+        group: 'summary',
+      }),
+    );
   const occupiedTargets = new Set<MappingTarget>([
     ...metadataRows.map((row) => row.target),
     ...amountRows.map((row) => row.target),
   ]);
+  const dynamicFields = result.dynamicFields ?? [];
+  const fieldSignature = (label: string, value: unknown, page: number | null) =>
+    `${label.replace(/\s/g, '')}|${String(value ?? '').replace(/\s/g, '')}|${page ?? '-'}`;
+  const dynamicSignatures = new Set(
+    dynamicFields.map((field) =>
+      fieldSignature(field.label, field.value, field.page),
+    ),
+  );
+  const sourceRows: ReviewRow[] = [
+    ...dynamicFields
+      .filter(
+        (field) =>
+          !field.id.startsWith('field:metadata:') &&
+          !field.id.startsWith('field:evidence:') &&
+          !field.id.startsWith('field:line:'),
+      )
+      .map(dynamicFieldRow),
+    ...result.additionalFields
+      .filter(
+        (field) =>
+          !dynamicSignatures.has(
+            fieldSignature(field.label, field.value, field.page),
+          ),
+      )
+      .map(additionalRow),
+  ];
   const additionalRows: ReviewRow[] = [];
-  for (const row of result.additionalFields
-    .filter((field) => field.group !== 'fee')
-    .map(additionalRow)) {
-    if (row.target && occupiedTargets.has(row.target)) continue;
+  for (const candidate of sourceRows) {
+    // Every source field stays visible. When two source fields suggest the same
+    // canonical role, keep the first mapping and leave the duplicate for review
+    // instead of silently dropping it or overwriting the confirmed value.
+    const row =
+      candidate.target && occupiedTargets.has(candidate.target)
+        ? {
+            ...candidate,
+            target: '' as MappingTarget,
+            group:
+              candidate.group === 'summary'
+                ? ('summary' as ReviewGroup)
+                : ('unmapped' as ReviewGroup),
+          }
+        : candidate;
     additionalRows.push(row);
     if (row.target) occupiedTargets.add(row.target);
   }
@@ -265,84 +409,244 @@ const emptyRow = (): ReviewRow => ({
   group: 'unmapped',
 });
 
+function buildConfirmedReviewRows(
+  detail: ConfirmedSettlementDetail,
+  extraction: VisionExtractionResult,
+): ReviewRow[] {
+  const baseRows = buildReviewRows(extraction);
+  const used = new Set<number>();
+  const rows = baseRows.map((row) => {
+    const reviewedIndex = detail.reviewedFields.findIndex(
+      (field, index) =>
+        !used.has(index) &&
+        (field.id === row.id || (row.target && field.target === row.target)),
+    );
+    if (reviewedIndex < 0) return row;
+    used.add(reviewedIndex);
+    const field = detail.reviewedFields[reviewedIndex];
+    return {
+      ...row,
+      source: field.label || row.source,
+      value: field.value === null ? '' : String(field.value),
+      target: knownTargets.has(field.target as MappingTarget)
+        ? (field.target as MappingTarget)
+        : row.target,
+    };
+  });
+
+  detail.reviewedFields.forEach((field, index) => {
+    if (used.has(index)) return;
+    const target = knownTargets.has(field.target as MappingTarget)
+      ? (field.target as MappingTarget)
+      : '';
+    rows.push({
+      id: field.id || `confirmed:${index}`,
+      source: field.label || field.target || `确认字段 ${index + 1}`,
+      evidence: '确认记录中保存的动态字段',
+      confidence: null,
+      target,
+      value: field.value === null ? '' : String(field.value),
+      group: 'unmapped',
+    });
+  });
+  return rows;
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  return fallback;
+}
+
+function confirmedStatusLabel(status: ConfirmedSettlementBill['status']) {
+  return status === 'confirmed'
+    ? '当前确认'
+    : status === 'superseded'
+      ? '历史版本'
+      : '已撤销';
+}
+
 export default function BillRecognitionPage() {
   const requestCoordinator = useRef(createSettlementRequestCoordinator());
+  const lastRecognitionFile = useRef<File | null>(null);
+  const historyRequestRevision = useRef(0);
   const [fileName, setFileName] = useState('');
   const [result, setResult] = useState<VisionExtractionResult | null>(null);
   const [rows, setRows] = useState<ReviewRow[]>([]);
   const [recognizing, setRecognizing] = useState(false);
+  const [attemptedFileName, setAttemptedFileName] = useState('');
+  const [recognitionError, setRecognitionError] = useState<string | null>(null);
   const [refining, setRefining] = useState(false);
-  const [refinements, setRefinements] = useState<Record<string, VisionRefinementItem>>({});
+  const [refinements, setRefinements] = useState<
+    Record<string, VisionRefinementItem>
+  >({});
   const [ocrResult, setOcrResult] = useState<OcrExtractionResult | null>(null);
   const [pageImages, setPageImages] = useState<string[]>([]);
-  const [selectedEvidence, setSelectedEvidence] = useState<OcrFieldEvidence | null>(null);
+  const [selectedEvidence, setSelectedEvidence] =
+    useState<OcrFieldEvidence | null>(null);
   const [confirming, setConfirming] = useState(false);
-  const [confirmedDetail, setConfirmedDetail] = useState<ConfirmedSettlementDetail | null>(null);
+  const [confirmedDetail, setConfirmedDetail] =
+    useState<ConfirmedSettlementDetail | null>(null);
   const [recognitionStage, setRecognitionStage] = useState('等待上传');
   const [savedAt, setSavedAt] = useState<string | null>(null);
+  const [confirmedBills, setConfirmedBills] = useState<
+    ConfirmedSettlementBill[]
+  >([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [loadingConfirmedId, setLoadingConfirmedId] = useState<string | null>(
+    null,
+  );
   const confirmed = confirmedDetail !== null;
-  const interactionLocked = isBillInteractionLocked({ recognizing, confirming });
+  const interactionLocked =
+    isBillInteractionLocked({ recognizing, confirming }) ||
+    loadingConfirmedId !== null;
 
   const confirmedValues = useMemo(
-    () => confirmedDetail ? mapConfirmedReviewedValues(confirmedDetail) : {},
+    () => (confirmedDetail ? mapConfirmedReviewedValues(confirmedDetail) : {}),
     [confirmedDetail],
   );
-  const displayLineItems = useMemo(() => result ? mergeFeeLineItems(result) : [], [result]);
-  const needsReview = Boolean(
-    result?.warnings.length || rows.some((row) => row.derived || (row.confidence !== null && row.confidence < 0.9)),
+  const displayLineItems = useMemo(
+    () => (result ? mergeFeeLineItems(result) : []),
+    [result],
   );
-  const ocrBlocksConfirmation = Boolean(ocrResult && hasOcrBlockingIssue(rows, ocrResult));
+  const dynamicFormulaChecks = useMemo(
+    () => (result ? readDynamicFormulaChecks(result) : []),
+    [result],
+  );
+  const needsReview = Boolean(
+    result?.warnings.length ||
+    dynamicFormulaChecks.some((check) => check.status !== 'passed') ||
+    rows.some(
+      (row) => row.derived || (row.confidence !== null && row.confidence < 0.9),
+    ),
+  );
+  const ocrHasConflict = Boolean(ocrResult && hasOcrConflict(rows, ocrResult));
+
+  const refreshConfirmedHistory = useCallback(async () => {
+    const revision = ++historyRequestRevision.current;
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const bills = await reconciliationApi.confirmedSettlements({
+        includeHistory: true,
+      });
+      if (historyRequestRevision.current === revision) setConfirmedBills(bills);
+    } catch (error) {
+      if (historyRequestRevision.current === revision) {
+        setHistoryError(
+          error instanceof Error ? error.message : '已确认单据加载失败',
+        );
+      }
+    } finally {
+      if (historyRequestRevision.current === revision) setHistoryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshConfirmedHistory();
+    return () => {
+      historyRequestRevision.current += 1;
+    };
+  }, [refreshConfirmedHistory]);
+
+  const loadConfirmedSettlement = async (bill: ConfirmedSettlementBill) => {
+    if (interactionLocked || loadingConfirmedId) return;
+    setLoadingConfirmedId(bill.id);
+    setHistoryError(null);
+    try {
+      const detail = await reconciliationApi.confirmedSettlement(bill.id);
+      const extraction = detail.extraction.lineItems.length
+        ? detail.extraction
+        : {
+            ...detail.extraction,
+            lineItems: [...detail.salesLines, ...detail.feeLines],
+          };
+      requestCoordinator.current.activateBill(
+        getSettlementBillIdentity(detail.bill.sourceFileName, extraction),
+      );
+      setFileName(detail.bill.sourceFileName);
+      setResult(extraction);
+      setRows(buildConfirmedReviewRows(detail, extraction));
+      setConfirmedDetail(detail);
+      setOcrResult(null);
+      setRefinements({});
+      setRefining(false);
+      setSelectedEvidence(null);
+      setPageImages((current) => {
+        current.forEach((url) => URL.revokeObjectURL(url));
+        return [];
+      });
+      setRecognitionError(null);
+      setRecognitionStage('已从确认记录加载');
+      setSavedAt(null);
+    } catch (error) {
+      setHistoryError(
+        error instanceof Error ? error.message : '确认单据详情加载失败',
+      );
+    } finally {
+      setLoadingConfirmedId(null);
+    }
+  };
 
   const recognize = async (file?: File) => {
     if (!file || interactionLocked) return;
+    setAttemptedFileName(file.name);
     if (!file.name.toLowerCase().endsWith('.pdf')) {
-      toast.error('请上传 PDF 格式的商场结算单。');
+      lastRecognitionFile.current = null;
+      const message = '请上传 PDF 格式的商场结算单。';
+      setRecognitionError(message);
+      toast.error(message);
       return;
     }
+    lastRecognitionFile.current = file;
+    setRecognitionError(null);
+    const previousBillIdentity =
+      requestCoordinator.current.currentBillIdentity();
     const recognitionToken = requestCoordinator.current.beginRecognition();
     if (!recognitionToken) return;
     setRecognizing(true);
-    setFileName('');
-    setResult(null);
-    setRows([]);
-    setSavedAt(null);
-    setConfirmedDetail(null);
-    setRefining(false);
-    setRefinements({});
-    setOcrResult(null);
-    setSelectedEvidence(null);
-    pageImages.forEach((url) => URL.revokeObjectURL(url));
-    setPageImages([]);
     let activeBillIdentity: string | null = null;
     try {
-      setRecognitionStage('正在渲染单据页面');
-      const pages = await renderPdfPagesForVision(file);
-      if (!requestCoordinator.current.isRecognitionCurrent(recognitionToken)) return;
-      setPageImages(pages.map((page) => URL.createObjectURL(page)));
-      setRecognitionStage('正在进行视觉识别和 OCR 校验，通常需要 1-2 分钟');
-      const [visionAttempt, ocrAttempt] = await Promise.allSettled([
-        reconciliationApi.extractVisionBill(file.name, pages),
-        reconciliationApi.extractOcrBill(pages),
-      ]);
-      if (!requestCoordinator.current.isRecognitionCurrent(recognitionToken)) return;
-      if (visionAttempt.status === 'rejected') {
-        if (ocrAttempt.status === 'fulfilled') {
-          setOcrResult(ocrAttempt.value);
-          setRecognitionStage('视觉识别失败，OCR 已完成，请稍后重试视觉识别');
-          toast.error('视觉识别未完成，但 OCR 已返回。请保留原文件并重试。');
-          return;
-        }
-        throw visionAttempt.reason;
-      }
-      const extraction = visionAttempt.value;
-      const ocr = ocrAttempt.status === 'fulfilled' ? ocrAttempt.value : null;
-      if (!ocr) toast.warning('OCR 校验未完成，结果必须人工复核后才能确认。');
-      activeBillIdentity = getSettlementBillIdentity(extraction.fileName, extraction);
-      if (!requestCoordinator.current.activateBill(activeBillIdentity, recognitionToken)) return;
+      const { pages, extraction, ocr, ocrWarning } =
+        await recognizeSettlementPdf(file, (stage) => {
+          if (!requestCoordinator.current.isRecognitionCurrent(recognitionToken))
+            return;
+          setRecognitionStage(
+            stage === 'rendering'
+              ? '正在渲染单据页面'
+              : stage === 'recognizing'
+                ? '正在进行视觉识别和 OCR 校验，通常需要 1-2 分钟'
+                : '识别完成，正在检查金额和证据',
+          );
+        });
+      if (!requestCoordinator.current.isRecognitionCurrent(recognitionToken))
+        return;
+      if (ocrWarning) toast.warning(ocrWarning);
+      activeBillIdentity = getSettlementBillIdentity(
+        extraction.fileName,
+        extraction,
+      );
+      if (
+        !requestCoordinator.current.activateBill(
+          activeBillIdentity,
+          recognitionToken,
+        )
+      )
+        return;
+      setPageImages((current) => {
+        current.forEach((url) => URL.revokeObjectURL(url));
+        return pages.map((page) => URL.createObjectURL(page));
+      });
       setFileName(extraction.fileName);
       setResult(extraction);
       setOcrResult(ocr);
       setRows(buildReviewRows(extraction));
+      setSavedAt(null);
+      setConfirmedDetail(null);
+      setRefinements({});
+      setSelectedEvidence(null);
+      setRecognitionError(null);
       setRecognitionStage('识别完成，正在检查金额和证据');
       const candidates = collectVisionRefinementCandidates(extraction);
       if (candidates.length) {
@@ -350,48 +654,101 @@ export default function BillRecognitionPage() {
         try {
           const tiles = await renderPdfTilesForVision(
             file,
-            candidates.flatMap((candidate) => candidate.page === null ? [] : [candidate.page]),
+            candidates.flatMap((candidate) =>
+              candidate.page === null ? [] : [candidate.page],
+            ),
           );
-          const refinementResult = await reconciliationApi.refineVisionBill(candidates, tiles);
-          if (requestCoordinator.current.currentBillIdentity() !== activeBillIdentity) return;
+          const refinementResult = await reconciliationApi.refineVisionBill(
+            candidates,
+            tiles,
+          );
+          if (
+            requestCoordinator.current.currentBillIdentity() !==
+            activeBillIdentity
+          )
+            return;
           const indexed = indexVisionRefinements(refinementResult);
           setRefinements(indexed);
-          setRows((current) => current.map((row) => indexed[row.id]
-            ? {
-                ...row,
-                refinement: indexed[row.id],
-                confidence: indexed[row.id].status === 'confirmed'
-                  ? Math.max(row.confidence ?? 0, indexed[row.id].confidence ?? 0.9)
-                  : row.confidence,
-              }
-            : row));
+          setRows((current) =>
+            current.map((row) =>
+              indexed[row.id]
+                ? {
+                    ...row,
+                    refinement: indexed[row.id],
+                    confidence:
+                      indexed[row.id].status === 'confirmed'
+                        ? Math.max(
+                            row.confidence ?? 0,
+                            indexed[row.id].confidence ?? 0.9,
+                          )
+                        : row.confidence,
+                  }
+                : row,
+            ),
+          );
         } catch (error) {
-          if (requestCoordinator.current.currentBillIdentity() === activeBillIdentity) {
-            toast.warning(error instanceof Error ? `二次复核未完成：${error.message}` : '低置信字段二次复核未完成。');
+          if (
+            requestCoordinator.current.currentBillIdentity() ===
+            activeBillIdentity
+          ) {
+            toast.warning(
+              error instanceof Error
+                ? `二次复核未完成：${error.message}`
+                : '低置信字段二次复核未完成。',
+            );
           }
         } finally {
-          if (requestCoordinator.current.currentBillIdentity() === activeBillIdentity) setRefining(false);
+          if (
+            requestCoordinator.current.currentBillIdentity() ===
+            activeBillIdentity
+          )
+            setRefining(false);
         }
       }
-      if (requestCoordinator.current.currentBillIdentity() === activeBillIdentity) {
-        toast.success('AI 已完成结构化识别，请复核推导字段、汇总金额和明细表。');
+      if (
+        requestCoordinator.current.currentBillIdentity() === activeBillIdentity
+      ) {
+        toast.success(
+          'AI 已完成结构化识别，请复核推导字段、汇总金额和明细表。',
+        );
       }
     } catch (error) {
       if (requestCoordinator.current.isRecognitionCurrent(recognitionToken)) {
-        toast.error(error instanceof Error ? error.message : '视觉识别失败，请重试。');
+        const message = errorMessage(error, '视觉识别失败，请重试。');
+        setRecognitionStage('识别失败，可直接重试');
+        setRecognitionError(message);
+        toast.error(message);
       }
     } finally {
-      const requestIsCurrent = activeBillIdentity
-        ? requestCoordinator.current.currentBillIdentity() === activeBillIdentity
+      let requestIsCurrent = activeBillIdentity
+        ? requestCoordinator.current.currentBillIdentity() ===
+          activeBillIdentity
         : requestCoordinator.current.isRecognitionCurrent(recognitionToken);
+      if (!activeBillIdentity && requestIsCurrent && previousBillIdentity) {
+        requestCoordinator.current.activateBill(
+          previousBillIdentity,
+          recognitionToken,
+        );
+        requestIsCurrent = true;
+      }
       if (requestIsCurrent) setRecognizing(false);
     }
   };
 
   const saveReview = () => {
     if (!result || !fileName || interactionLocked) return;
-    const record = { draftType: 'local-review-draft', fileName, result, rows, ocrResult, savedAt: new Date().toISOString() };
-    localStorage.setItem(`reconciliation-local-draft:${fileName}`, JSON.stringify(record));
+    const record = {
+      draftType: 'local-review-draft',
+      fileName,
+      result,
+      rows,
+      ocrResult,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(
+      `reconciliation-local-draft:${fileName}`,
+      JSON.stringify(record),
+    );
     setSavedAt(record.savedAt);
     toast.success('本机草稿已保存，仅用于继续复核，不代表结算单已确认。');
   };
@@ -399,7 +756,8 @@ export default function BillRecognitionPage() {
   const confirmSettlement = async () => {
     if (!result || !fileName || interactionLocked) return;
     const billIdentity = getSettlementBillIdentity(fileName, result);
-    const confirmationToken = requestCoordinator.current.beginConfirmation(billIdentity);
+    const confirmationToken =
+      requestCoordinator.current.beginConfirmation(billIdentity);
     if (!confirmationToken) return;
     setConfirming(true);
     let confirmationPersisted = false;
@@ -414,7 +772,7 @@ export default function BillRecognitionPage() {
           target,
           value,
         })),
-        clientReportedOcrVerified: Boolean(ocrResult) && !ocrBlocksConfirmation,
+        clientReportedOcrVerified: Boolean(ocrResult) && !ocrHasConflict,
       };
       const detail = await persistSettlementConfirmation(
         input,
@@ -426,22 +784,36 @@ export default function BillRecognitionPage() {
       if (detail) {
         confirmationPersisted = true;
         toast.success(`结算单已确认，版本 V${detail.bill.version}`);
+        void refreshConfirmedHistory();
       }
     } catch (error) {
       if (requestCoordinator.current.isConfirmationCurrent(confirmationToken)) {
         toast.error(error instanceof Error ? error.message : '确认结算单失败');
       }
     } finally {
-      const requestIsCurrent = requestCoordinator.current.isConfirmationCurrent(confirmationToken);
-      requestCoordinator.current.finishConfirmation(confirmationToken, confirmationPersisted);
+      const requestIsCurrent =
+        requestCoordinator.current.isConfirmationCurrent(confirmationToken);
+      requestCoordinator.current.finishConfirmation(
+        confirmationToken,
+        confirmationPersisted,
+      );
       if (requestIsCurrent) setConfirming(false);
     }
   };
 
   const exportReview = () => {
     if (!result || !fileName || interactionLocked) return;
-    const record = { fileName, result, rows, ocrResult, confirmed, exportedAt: new Date().toISOString() };
-    const blob = new Blob([JSON.stringify(record, null, 2)], { type: 'application/json;charset=utf-8' });
+    const record = {
+      fileName,
+      result,
+      rows,
+      ocrResult,
+      confirmed,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(record, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -452,7 +824,9 @@ export default function BillRecognitionPage() {
 
   const update = (id: string, patch: Partial<ReviewRow>) => {
     if (interactionLocked) return;
-    setRows((current) => current.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+    setRows((current) =>
+      current.map((row) => (row.id === id ? { ...row, ...patch } : row)),
+    );
   };
 
   return (
@@ -461,33 +835,131 @@ export default function BillRecognitionPage() {
         <div>
           <p className="eyebrow">视觉智能识别</p>
           <h2>结算单智能识别</h2>
-          <p>上传扫描版结算单，复核单据原文、汇总金额与明细后，再进入 ERP 对账。</p>
+          <p>
+            上传扫描版结算单，复核单据原文、汇总金额与明细后，再进入 ERP 对账。
+          </p>
         </div>
         <label className="button primary recognition-upload">
-          {interactionLocked ? <LoaderCircle className="spin" size={17} /> : <Upload size={17} />}
-          {confirming ? '正在确认' : recognizing ? '正在识别' : '上传结算单'}
-          <input type="file" accept=".pdf,application/pdf" disabled={interactionLocked} onChange={(event) => recognize(event.target.files?.[0])} />
+          {interactionLocked ? (
+            <LoaderCircle className="spin" size={17} />
+          ) : (
+            <Upload size={17} />
+          )}
+          {confirming
+            ? '正在确认'
+            : recognizing
+              ? '正在识别'
+              : loadingConfirmedId
+                ? '正在加载记录'
+                : '上传结算单'}
+          <input
+            type="file"
+            accept=".pdf,application/pdf"
+            disabled={interactionLocked}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.currentTarget.value = '';
+              void recognize(file);
+            }}
+          />
         </label>
       </section>
+
+      {(recognizing || recognitionError) && (
+        <section
+          className={`recognition-attempt ${recognitionError ? 'failed' : 'running'}`}
+          role={recognitionError ? 'alert' : 'status'}
+        >
+          {recognitionError ? (
+            <AlertTriangle size={20} />
+          ) : (
+            <LoaderCircle className="spin" size={20} />
+          )}
+          <div>
+            <strong>
+              {recognitionError
+                ? `${attemptedFileName || '该文件'}识别未完成`
+                : `正在识别 ${attemptedFileName}`}
+            </strong>
+            <p>
+              {recognitionError ?? recognitionStage}
+              {result
+                ? ' 当前页面中的识别结果已保留，不会因本次失败丢失。'
+                : ''}
+            </p>
+          </div>
+          {recognitionError && lastRecognitionFile.current && (
+            <button
+              className="button secondary"
+              type="button"
+              disabled={interactionLocked}
+              onClick={() =>
+                void recognize(lastRecognitionFile.current ?? undefined)
+              }
+            >
+              <RotateCcw size={16} />
+              重新识别
+            </button>
+          )}
+        </section>
+      )}
+
+      <ConfirmedHistorySection
+        bills={confirmedBills}
+        loading={historyLoading}
+        error={historyError}
+        activeId={confirmedDetail?.bill.id ?? null}
+        loadingId={loadingConfirmedId}
+        disabled={interactionLocked}
+        onRefresh={() => void refreshConfirmedHistory()}
+        onLoad={(bill) => void loadConfirmedSettlement(bill)}
+      />
 
       {!fileName && (
         <section className="recognition-empty">
           <FileSearch size={30} />
           <h3>上传一份商场结算单开始识别</h3>
-          <p>识别结果不会直接入账。系统会区分原文值、推导值、汇总数据和明细数据。</p>
+          <p>
+            识别结果不会直接入账。系统会区分原文值、推导值、汇总数据和明细数据。
+          </p>
         </section>
       )}
 
       {fileName && result && !confirmed && (
         <>
           <section className="recognition-status">
-            <span className="status-icon"><FileSearch size={19} /></span>
-            <div><strong>{fileName}</strong><p>{recognitionStage}</p></div>
-            <span className="waiting-badge">{refining ? '低置信字段二次复核中' : '待人工复核'}</span>
+            <span className="status-icon">
+              <FileSearch size={19} />
+            </span>
+            <div>
+              <strong>{fileName}</strong>
+              <p>
+                {recognizing
+                  ? '当前识别结果已保留；新文件的处理进度见上方。'
+                  : recognitionError
+                    ? '当前识别结果仍可继续复核；失败的新文件可在上方直接重试。'
+                    : recognitionStage}
+              </p>
+            </div>
+            <span className="waiting-badge">
+              {refining ? '低置信字段二次复核中' : '待人工复核'}
+            </span>
           </section>
 
-          <FieldSection title="单据基础信息" description="页眉、主体与账期。系统推导值会明确标识。" rows={rows.filter((row) => row.group === 'basic')} onUpdate={update} disabled={interactionLocked} />
-          <FieldSection title="本期结算汇总" description="仅使用结算汇总区域直接打印的金额作为对账主值。" rows={rows.filter((row) => row.group === 'summary')} onUpdate={update} disabled={interactionLocked} />
+          <FieldSection
+            title="单据基础信息"
+            description="页眉、主体与账期。系统推导值会明确标识。"
+            rows={rows.filter((row) => row.group === 'basic')}
+            onUpdate={update}
+            disabled={interactionLocked}
+          />
+          <FieldSection
+            title="本期结算汇总"
+            description="仅使用结算汇总区域直接打印的金额作为对账主值。"
+            rows={rows.filter((row) => row.group === 'summary')}
+            onUpdate={update}
+            disabled={interactionLocked}
+          />
 
           {ocrResult && (
             <MethodComparison
@@ -497,10 +969,25 @@ export default function BillRecognitionPage() {
             />
           )}
 
-          <LineItemSections items={displayLineItems} refinements={refinements} />
-          <ValidationPanel rows={rows} items={displayLineItems} />
+          <LineItemSections
+            items={displayLineItems}
+            refinements={refinements}
+          />
+          <ValidationPanel
+            rows={rows}
+            items={displayLineItems}
+            result={result}
+          />
 
-          <AttributeSection rows={rows.filter((row) => row.group === 'additional')} />
+          {rows.some((row) => row.group === 'additional') && (
+            <FieldSection
+              title="已确认附加与动态信息"
+              description="按原标签保存的附加字段，只读展示。"
+              rows={rows.filter((row) => row.group === 'additional')}
+              onUpdate={() => undefined}
+              disabled
+            />
+          )}
 
           {rows.some((row) => row.group === 'unmapped') && (
             <FieldSection
@@ -509,35 +996,158 @@ export default function BillRecognitionPage() {
               rows={rows.filter((row) => row.group === 'unmapped')}
               onUpdate={update}
               disabled={interactionLocked}
-              action={<button className="button secondary" disabled={interactionLocked} onClick={() => { if (!interactionLocked) setRows((current) => [...current, emptyRow()]); }}><Plus size={16} />补充字段</button>}
+              action={
+                <button
+                  className="button secondary"
+                  disabled={interactionLocked}
+                  onClick={() => {
+                    if (!interactionLocked)
+                      setRows((current) => [...current, emptyRow()]);
+                  }}
+                >
+                  <Plus size={16} />
+                  补充字段
+                </button>
+              }
             />
           )}
 
-          <section className={`recognition-review ${needsReview ? 'review' : 'ready'}`}>
-            {needsReview ? <AlertTriangle size={20} /> : <BadgeCheck size={20} />}
+          <section
+            className={`recognition-review ${needsReview ? 'review' : 'ready'}`}
+          >
+            {needsReview ? (
+              <AlertTriangle size={20} />
+            ) : (
+              <BadgeCheck size={20} />
+            )}
             <div>
-              <strong>{needsReview ? '存在推导值或待复核项' : '识别结果可确认'}</strong>
-              <p>{result.warnings[0] ?? '请核对原单后确认；确认结果将作为后续 ERP 对账依据。'}</p>
+              <strong>
+                {needsReview ? '存在推导值或待复核项' : '识别结果可确认'}
+              </strong>
+              <p>
+                {result.warnings[0] ??
+                  (dynamicFormulaChecks.some(
+                    (check) => check.status !== 'passed',
+                  )
+                    ? '当前单据存在未通过或缺少字段的动态公式，请核对公式证据和代入值。'
+                    : '请核对原单后确认；确认结果将作为后续 ERP 对账依据。')}
+              </p>
             </div>
-            <button className="button primary" disabled={interactionLocked || refining || ocrBlocksConfirmation} onClick={confirmSettlement}>{confirming ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}{confirming ? '正在确认' : '确认结算单'}</button>
-            <button className="button secondary" type="button" disabled={interactionLocked} onClick={saveReview}>保存本机草稿</button>
-            <button className="button secondary" type="button" disabled={interactionLocked} onClick={exportReview}>导出 JSON</button>
-            {savedAt && <small>本机草稿：{new Date(savedAt).toLocaleString()}</small>}
+            <button
+              className="button primary"
+              disabled={interactionLocked || refining}
+              onClick={confirmSettlement}
+            >
+              {confirming ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <Check size={16} />
+              )}
+              {confirming ? '正在确认' : '确认结算单'}
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={interactionLocked}
+              onClick={saveReview}
+            >
+              保存本机草稿
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              disabled={interactionLocked}
+              onClick={exportReview}
+            >
+              导出 JSON
+            </button>
+            {savedAt && (
+              <small>本机草稿：{new Date(savedAt).toLocaleString()}</small>
+            )}
           </section>
         </>
       )}
 
       {fileName && confirmed && (
-        <section className="confirmed-result">
-          <div className="confirmed-heading"><BadgeCheck size={23} /><div><h3>结算单已确认</h3><p>{fileName} 已完成结构化复核，等待同账期 ERP 数据。</p></div><span className="waiting-badge">待 ERP 对账</span></div>
-          <div className="confirmed-grid">
-            <div><span>数据库记录 ID</span><strong>{confirmedDetail.bill.id}</strong></div>
-            <div><span>确认版本</span><strong>V{confirmedDetail.bill.version}</strong></div>
-            <div><span>确认人</span><strong>{confirmedDetail.bill.confirmedBy}</strong></div>
-            <div><span>确认时间</span><strong>{new Date(confirmedDetail.bill.confirmedAt).toLocaleString()}</strong></div>
-            {Object.entries(confirmedValues).map(([target, value]) => <div key={target}><span>{targets.find(([key]) => key === target)?.[1]}</span><strong>{value}</strong></div>)}
-          </div>
-        </section>
+        <>
+          <section className="confirmed-result">
+            <div className="confirmed-heading">
+              <BadgeCheck size={23} />
+              <div>
+                <h3>结算单已确认</h3>
+                <p>{fileName} 已完成结构化复核，等待同账期 ERP 数据。</p>
+              </div>
+              <span className="waiting-badge">待 ERP 对账</span>
+            </div>
+            <div className="confirmed-grid">
+              <div>
+                <span>数据库记录 ID</span>
+                <strong>{confirmedDetail.bill.id}</strong>
+              </div>
+              <div>
+                <span>确认版本</span>
+                <strong>V{confirmedDetail.bill.version}</strong>
+              </div>
+              <div>
+                <span>确认人</span>
+                <strong>{confirmedDetail.bill.confirmedBy}</strong>
+              </div>
+              <div>
+                <span>确认时间</span>
+                <strong>
+                  {new Date(confirmedDetail.bill.confirmedAt).toLocaleString()}
+                </strong>
+              </div>
+              {Object.entries(confirmedValues).map(([target, value]) => (
+                <div key={target}>
+                  <span>
+                    {targets.find(([key]) => key === target)?.[1] ?? target}
+                  </span>
+                  <strong>{value}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <FieldSection
+            title="已确认基础信息"
+            description="以下为确认时保存的字段与原单证据，只读展示。"
+            rows={rows.filter((row) => row.group === 'basic')}
+            onUpdate={() => undefined}
+            disabled
+          />
+          <FieldSection
+            title="已确认结算汇总"
+            description="保留确认时的汇总字段及动态业务映射。"
+            rows={rows.filter((row) => row.group === 'summary')}
+            onUpdate={() => undefined}
+            disabled
+          />
+          <LineItemSections items={displayLineItems} refinements={{}} />
+          <ValidationPanel
+            rows={rows}
+            items={displayLineItems}
+            result={result}
+          />
+          {rows.some((row) => row.group === 'additional') && (
+            <FieldSection
+              title="单据附加与动态信息"
+              description="保留模型按原单发现的字段名称和值；可选业务映射，不映射也会随确认记录保存。"
+              rows={rows.filter((row) => row.group === 'additional')}
+              onUpdate={update}
+              disabled={interactionLocked}
+            />
+          )}
+          {rows.some((row) => row.group === 'unmapped') && (
+            <FieldSection
+              title="已确认动态字段"
+              description="未映射到固定业务角色的字段也按原标签完整保留。"
+              rows={rows.filter((row) => row.group === 'unmapped')}
+              onUpdate={() => undefined}
+              disabled
+            />
+          )}
+        </>
       )}
 
       {selectedEvidence && pageImages[selectedEvidence.evidence.page - 1] && (
@@ -552,7 +1162,142 @@ export default function BillRecognitionPage() {
   );
 }
 
-function FieldSection({ title, description, rows, onUpdate, action, emptyText, disabled = false }: {
+function ConfirmedHistorySection({
+  bills,
+  loading,
+  error,
+  activeId,
+  loadingId,
+  disabled,
+  onRefresh,
+  onLoad,
+}: {
+  bills: ConfirmedSettlementBill[];
+  loading: boolean;
+  error: string | null;
+  activeId: string | null;
+  loadingId: string | null;
+  disabled: boolean;
+  onRefresh: () => void;
+  onLoad: (bill: ConfirmedSettlementBill) => void;
+}) {
+  return (
+    <section className="review-section confirmed-history">
+      <div className="section-heading">
+        <div>
+          <h3>
+            <History size={18} />
+            已确认结算单
+          </h3>
+          <p>
+            确认后的单据保存在服务器中，可随时重新打开查看字段、公式和全部明细。
+          </p>
+        </div>
+        <button
+          className="button secondary"
+          type="button"
+          disabled={loading || disabled}
+          onClick={onRefresh}
+        >
+          <RefreshCw className={loading ? 'spin' : ''} size={16} />
+          刷新
+        </button>
+      </div>
+      {error && (
+        <div className="history-error" role="alert">
+          <AlertTriangle size={17} />
+          <span>{error}</span>
+          <button type="button" onClick={onRefresh}>
+            重试
+          </button>
+        </div>
+      )}
+      {loading && !bills.length ? (
+        <div className="review-empty">
+          <LoaderCircle className="spin" size={18} />
+          正在加载已确认单据…
+        </div>
+      ) : bills.length ? (
+        <div className="detail-table-wrap">
+          <table className="detail-table history-table">
+            <thead>
+              <tr>
+                <th>文件 / 门店</th>
+                <th>商场</th>
+                <th>账期</th>
+                <th>最终应付</th>
+                <th>确认信息</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bills.map((bill) => (
+                <tr
+                  className={activeId === bill.id ? 'active-history-row' : ''}
+                  key={bill.id}
+                >
+                  <td>
+                    <strong>{bill.sourceFileName}</strong>
+                    <small>
+                      {bill.storeName || bill.storeCode || '未识别门店'} · V
+                      {bill.version} · {confirmedStatusLabel(bill.status)}
+                    </small>
+                  </td>
+                  <td>{bill.mallName || '-'}</td>
+                  <td>
+                    {bill.periodStart} 至 {bill.periodEnd}
+                  </td>
+                  <td>
+                    {formatNumber(numberValue(bill.settlementAmount) ?? 0)}
+                  </td>
+                  <td>
+                    {new Date(bill.confirmedAt).toLocaleString()}
+                    <small>{bill.confirmedBy}</small>
+                  </td>
+                  <td>
+                    <button
+                      className="history-load-button"
+                      type="button"
+                      disabled={disabled || Boolean(loadingId)}
+                      onClick={() => onLoad(bill)}
+                    >
+                      {loadingId === bill.id ? (
+                        <LoaderCircle className="spin" size={14} />
+                      ) : activeId === bill.id ? (
+                        <Check size={14} />
+                      ) : (
+                        <FileSearch size={14} />
+                      )}
+                      {loadingId === bill.id
+                        ? '加载中'
+                        : activeId === bill.id
+                          ? '当前查看'
+                          : '查看详情'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="review-empty">
+          尚无已确认单据。完成确认后会自动出现在这里。
+        </div>
+      )}
+    </section>
+  );
+}
+
+function FieldSection({
+  title,
+  description,
+  rows,
+  onUpdate,
+  action,
+  emptyText,
+  disabled = false,
+}: {
   title: string;
   description: string;
   rows: ReviewRow[];
@@ -564,37 +1309,85 @@ function FieldSection({ title, description, rows, onUpdate, action, emptyText, d
   return (
     <section className="review-section">
       <div className="section-heading">
-        <div><h3>{title}</h3><p>{description}</p></div>
+        <div>
+          <h3>{title}</h3>
+          <p>{description}</p>
+        </div>
         {action}
       </div>
       {rows.length ? (
         <div className="mapping-table" role="table" aria-label={title}>
-          <div className="mapping-row mapping-header" role="row"><span>单据原文 / 来源</span><span>业务字段</span><span>复核确认值</span><span>状态</span></div>
+          <div className="mapping-row mapping-header" role="row">
+            <span>单据原文 / 来源</span>
+            <span>业务字段</span>
+            <span>复核确认值</span>
+            <span>状态</span>
+          </div>
           {rows.map((row) => (
             <div className="mapping-row" role="row" key={row.id}>
-              <div><strong>{row.source || '未识别'}</strong><small>{row.evidence}</small></div>
-              <select aria-label={`${row.source}的业务字段`} value={row.target} disabled={disabled} onChange={(event) => onUpdate(row.id, { target: event.target.value as MappingTarget })}>
-                {targets.map(([value, label]) => <option value={value} key={value}>{label}</option>)}
+              <div>
+                <strong>{row.source || '未识别'}</strong>
+                <small>{row.evidence}</small>
+              </div>
+              <select
+                aria-label={`${row.source}的业务字段`}
+                value={row.target}
+                disabled={disabled}
+                onChange={(event) =>
+                  onUpdate(row.id, {
+                    target: event.target.value as MappingTarget,
+                  })
+                }
+              >
+                {targets.map(([value, label]) => (
+                  <option value={value} key={value}>
+                    {label}
+                  </option>
+                ))}
               </select>
-              <input aria-label={`${row.source}的确认值`} value={row.value} disabled={disabled} placeholder="录入或修正字段值" onChange={(event) => onUpdate(row.id, { value: event.target.value })} />
-              <span className={`confidence ${row.refinement?.status === 'conflict' || row.refinement?.status === 'unresolved' || row.derived || (row.confidence !== null && row.confidence < 0.9) ? 'low' : ''} ${row.refinement?.status ?? ''}`}>
+              <input
+                aria-label={`${row.source}的确认值`}
+                value={row.value}
+                disabled={disabled}
+                placeholder="录入或修正字段值"
+                onChange={(event) =>
+                  onUpdate(row.id, { value: event.target.value })
+                }
+              />
+              <span
+                className={`confidence ${row.refinement?.status === 'conflict' || row.refinement?.status === 'unresolved' || row.derived || (row.confidence !== null && row.confidence < 0.9) ? 'low' : ''} ${row.refinement?.status ?? ''}`}
+              >
                 {row.refinement?.status === 'confirmed'
                   ? `二次确认 ${Math.round((row.confidence ?? 0.9) * 100)}%`
                   : row.refinement?.status === 'conflict'
                     ? '识别冲突，保留原值'
                     : row.refinement?.status === 'unresolved'
                       ? '二次复核仍不清晰'
-                      : row.derived ? '系统推导' : row.confidence === null ? (row.source === '人工补充字段' ? '人工录入' : 'AI 识别') : `${Math.round(row.confidence * 100)}%`}
+                      : row.derived
+                        ? '系统推导'
+                        : row.confidence === null
+                          ? row.source === '人工补充字段'
+                            ? '人工录入'
+                            : 'AI 识别'
+                          : `${Math.round(row.confidence * 100)}%`}
               </span>
             </div>
           ))}
         </div>
-      ) : <div className="review-empty">{emptyText}</div>}
+      ) : (
+        <div className="review-empty">{emptyText}</div>
+      )}
     </section>
   );
 }
 
-function LineItemSections({ items, refinements }: { items: VisionLineItem[]; refinements: Record<string, VisionRefinementItem> }) {
+function LineItemSections({
+  items,
+  refinements,
+}: {
+  items: VisionLineItem[];
+  refinements: Record<string, VisionRefinementItem>;
+}) {
   const groups = useMemo(() => {
     const grouped = new Map<string, VisionLineItem[]>();
     for (const item of items) {
@@ -605,103 +1398,263 @@ function LineItemSections({ items, refinements }: { items: VisionLineItem[]; ref
   }, [items]);
 
   if (!groups.length) return null;
-  return <>{groups.map(([section, sectionItems]) =>
-    /扣款|费用/.test(section)
-      ? <FeeDetailTable section={section} items={sectionItems} refinements={refinements} allItems={items} key={section} />
-      : <DetailTable section={section} items={sectionItems} refinements={refinements} allItems={items} key={section} />,
-  )}</>;
+  return (
+    <>
+      {groups.map(([section, sectionItems]) =>
+        /扣款|费用/.test(section) ? (
+          <FeeDetailTable
+            section={section}
+            items={sectionItems}
+            refinements={refinements}
+            allItems={items}
+            key={section}
+          />
+        ) : (
+          <DetailTable
+            section={section}
+            items={sectionItems}
+            refinements={refinements}
+            allItems={items}
+            key={section}
+          />
+        ),
+      )}
+    </>
+  );
 }
 
-function DetailTable({ section, items, refinements, allItems }: { section: string; items: VisionLineItem[]; refinements: Record<string, VisionRefinementItem>; allItems: VisionLineItem[] }) {
-  const columns = [...new Set(items.flatMap((item) => Object.keys(item.values)))];
+function DetailTable({
+  section,
+  items,
+  refinements,
+  allItems,
+}: {
+  section: string;
+  items: VisionLineItem[];
+  refinements: Record<string, VisionRefinementItem>;
+  allItems: VisionLineItem[];
+}) {
+  const columns = [
+    ...new Set(items.flatMap((item) => Object.keys(item.values))),
+  ];
   return (
     <section className="review-section detail-section">
       <div className="section-heading">
-        <div><h3>{section}</h3><p>来自单据明细区，保留原始行与各列数值，不参与字段映射。</p></div>
-        <span className="detail-count"><TableProperties size={15} />{items.length} 行</span>
+        <div>
+          <h3>{section}</h3>
+          <p>来自单据明细区，保留原始行与各列数值，不参与字段映射。</p>
+        </div>
+        <span className="detail-count">
+          <TableProperties size={15} />
+          {items.length} 行
+        </span>
       </div>
       <div className="detail-table-wrap">
         <table className="detail-table">
-          <thead><tr><th>项目</th>{columns.map((column) => <th key={column}>{column}</th>)}<th>来源</th><th>可信度</th></tr></thead>
-          <tbody>{items.map((item, index) => (
-            <tr className={`detail-row-${item.rowType ?? 'detail'}`} key={`${item.label}-${index}`}>
-              <td><strong>{item.label}</strong></td>
-              {columns.map((column) => <td key={column}>{item.values[column] ?? '-'}</td>)}
-              <td>第 {item.page ?? '-'} 页</td>
-              <td><RefinementBadge item={item} refinement={refinements[`line:${allItems.indexOf(item)}`]} /></td>
+          <thead>
+            <tr>
+              <th>项目</th>
+              {columns.map((column) => (
+                <th key={column}>{column}</th>
+              ))}
+              <th>来源</th>
+              <th>可信度</th>
             </tr>
-          ))}</tbody>
+          </thead>
+          <tbody>
+            {items.map((item, index) => (
+              <tr
+                className={`detail-row-${item.rowType ?? 'detail'}`}
+                key={`${item.label}-${index}`}
+              >
+                <td>
+                  <strong>{item.label}</strong>
+                </td>
+                {columns.map((column) => (
+                  <td key={column}>{item.values[column] ?? '-'}</td>
+                ))}
+                <td>第 {item.page ?? '-'} 页</td>
+                <td>
+                  <RefinementBadge
+                    item={item}
+                    refinement={refinements[`line:${allItems.indexOf(item)}`]}
+                  />
+                </td>
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
     </section>
   );
 }
 
-function FeeDetailTable({ section, items, refinements, allItems }: { section: string; items: VisionLineItem[]; refinements: Record<string, VisionRefinementItem>; allItems: VisionLineItem[] }) {
-  const detailItems = items.filter((item) => !['subtotal', 'total'].includes(item.rowType ?? ''));
-  const groups = [...new Set(detailItems.map((item) => String(item.values['分组'] ?? '未分组')))];
-  const grandTotal = detailItems.reduce((sum, item) => sum + (numberValue(item.values['金额']) ?? 0), 0);
+function FeeDetailTable({
+  section,
+  items,
+  refinements,
+  allItems,
+}: {
+  section: string;
+  items: VisionLineItem[];
+  refinements: Record<string, VisionRefinementItem>;
+  allItems: VisionLineItem[];
+}) {
+  const columns = [
+    ...new Set(items.flatMap((item) => Object.keys(item.values))),
+  ];
+  const groupColumn = columns.find((column) =>
+    /^(分组|类别|group)$/i.test(column),
+  );
+  const amountColumn = columns.find((column) => /金额|amount/i.test(column));
+  const groups = [
+    ...new Set(
+      items.map((item) =>
+        String(
+          groupColumn ? (item.values[groupColumn] ?? '未分组') : '全部项目',
+        ),
+      ),
+    ),
+  ];
+  const amountValues = amountColumn
+    ? items
+        .filter((item) => !['subtotal', 'total'].includes(item.rowType ?? ''))
+        .map((item) => numberValue(item.values[amountColumn]))
+        .filter((value): value is number => value !== null)
+    : [];
+  const grandTotal = amountValues.reduce((sum, value) => sum + value, 0);
   return (
     <section className="review-section fee-section">
       <div className="section-heading">
-        <div><h3>{section}</h3><p>按原单分组展示，每个费用项目独立成行并自动计算小计。</p></div>
-        <span className="detail-count"><TableProperties size={15} />{detailItems.length} 项</span>
+        <div>
+          <h3>{section}</h3>
+          <p>
+            按原单动态列展示，不限定费用字段名称；小计、合计和附加列均原样保留。
+          </p>
+        </div>
+        <span className="detail-count">
+          <TableProperties size={15} />
+          {items.length} 项
+        </span>
       </div>
       {groups.map((group) => {
-        const groupItems = detailItems.filter((item) => String(item.values['分组'] ?? '未分组') === group);
-        const subtotal = groupItems.reduce((sum, item) => sum + (numberValue(item.values['金额']) ?? 0), 0);
+        const groupItems = items.filter(
+          (item) =>
+            String(
+              groupColumn ? (item.values[groupColumn] ?? '未分组') : '全部项目',
+            ) === group,
+        );
+        const subtotalValues = amountColumn
+          ? groupItems
+              .filter(
+                (item) => !['subtotal', 'total'].includes(item.rowType ?? ''),
+              )
+              .map((item) => numberValue(item.values[amountColumn]))
+              .filter((value): value is number => value !== null)
+          : [];
+        const subtotal = subtotalValues.reduce((sum, value) => sum + value, 0);
         return (
           <div className="fee-group" key={group}>
-            <div className="fee-group-heading"><strong>{group === '未分组' ? '未分组费用' : `${group} 类费用`}</strong><span>小计 {formatNumber(subtotal)}</span></div>
+            {(groups.length > 1 || group !== '全部项目') && (
+              <div className="fee-group-heading">
+                <strong>{group === '未分组' ? '未分组费用' : group}</strong>
+                {subtotalValues.length > 0 && (
+                  <span>识别明细小计 {formatNumber(subtotal)}</span>
+                )}
+              </div>
+            )}
             <div className="detail-table-wrap">
               <table className="detail-table fee-table">
-                <thead><tr><th>费用项目</th><th>费用代码</th><th>金额</th><th>来源</th><th>可信度</th></tr></thead>
-                <tbody>{groupItems.map((item, index) => (
-                  <tr key={`${item.label}-${index}`}>
-                    <td><strong>{item.label.replace(/[~～-]\d{4}/, '')}</strong></td>
-                    <td>{item.values['费用代码'] ?? '-'}</td>
-                    <td>{formatNumber(numberValue(item.values['金额']) ?? 0)}</td>
-                    <td>第 {item.page ?? '-'} 页</td>
-                    <td><RefinementBadge item={item} refinement={refinements[`line:${allItems.indexOf(item)}`]} /></td>
+                <thead>
+                  <tr>
+                    <th>项目</th>
+                    {columns.map((column) => (
+                      <th key={column}>{column}</th>
+                    ))}
+                    <th>来源</th>
+                    <th>可信度</th>
                   </tr>
-                ))}</tbody>
+                </thead>
+                <tbody>
+                  {groupItems.map((item, index) => (
+                    <tr
+                      className={`detail-row-${item.rowType ?? 'detail'}`}
+                      key={`${item.label}-${index}`}
+                    >
+                      <td>
+                        <strong>{item.label}</strong>
+                      </td>
+                      {columns.map((column) => {
+                        const value = item.values[column];
+                        const numericValue = /金额|amount/i.test(column)
+                          ? numberValue(value)
+                          : null;
+                        return (
+                          <td key={column}>
+                            {value === null ||
+                            value === undefined ||
+                            value === ''
+                              ? '-'
+                              : numericValue === null
+                                ? String(value)
+                                : formatNumber(numericValue)}
+                          </td>
+                        );
+                      })}
+                      <td>第 {item.page ?? '-'} 页</td>
+                      <td>
+                        <RefinementBadge
+                          item={item}
+                          refinement={
+                            refinements[`line:${allItems.indexOf(item)}`]
+                          }
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
               </table>
             </div>
           </div>
         );
       })}
-      <div className="fee-grand-total"><span>扣款费用明细合计</span><strong>{formatNumber(grandTotal)}</strong></div>
+      {amountValues.length > 0 && (
+        <div className="fee-grand-total">
+          <span>识别明细合计</span>
+          <strong>{formatNumber(grandTotal)}</strong>
+        </div>
+      )}
     </section>
   );
 }
 
-function RefinementBadge({ item, refinement }: { item: VisionLineItem; refinement?: VisionRefinementItem }) {
-  const low = refinement?.status === 'conflict' || refinement?.status === 'unresolved' || (item.confidence !== null && item.confidence < 0.9);
-  const text = refinement?.status === 'confirmed'
-    ? `二次确认 ${Math.round((refinement.confidence ?? item.confidence ?? 0.9) * 100)}%`
-    : refinement?.status === 'conflict'
-      ? '识别冲突'
-      : refinement?.status === 'unresolved'
-        ? '仍不清晰'
-        : item.confidence === null ? '待复核' : `${Math.round(item.confidence * 100)}%`;
-  return <span className={`confidence ${low ? 'low' : ''} ${refinement?.status ?? ''}`}>{text}</span>;
-}
-
-function AttributeSection({ rows }: { rows: ReviewRow[] }) {
-  if (!rows.length) return null;
+function RefinementBadge({
+  item,
+  refinement,
+}: {
+  item: VisionLineItem;
+  refinement?: VisionRefinementItem;
+}) {
+  const low =
+    refinement?.status === 'conflict' ||
+    refinement?.status === 'unresolved' ||
+    (item.confidence !== null && item.confidence < 0.9);
+  const text =
+    refinement?.status === 'confirmed'
+      ? `二次确认 ${Math.round((refinement.confidence ?? item.confidence ?? 0.9) * 100)}%`
+      : refinement?.status === 'conflict'
+        ? '识别冲突'
+        : refinement?.status === 'unresolved'
+          ? '仍不清晰'
+          : item.confidence === null
+            ? '待复核'
+            : `${Math.round(item.confidence * 100)}%`;
   return (
-    <section className="review-section attribute-section">
-      <div className="section-heading"><div><h3>单据附加信息</h3><p>已自动归类，仅用于单据档案与检索，不要求人工映射到 ERP。</p></div></div>
-      <div className="attribute-grid">
-        {rows.map((row) => (
-          <div key={row.id}>
-            <span>{targets.find(([target]) => target === row.target)?.[1] ?? row.source}</span>
-            <strong>{row.value || '-'}</strong>
-            <small>{row.evidence} · {row.confidence === null ? '待复核' : `${Math.round(row.confidence * 100)}%`}</small>
-          </div>
-        ))}
-      </div>
-    </section>
+    <span
+      className={`confidence ${low ? 'low' : ''} ${refinement?.status ?? ''}`}
+    >
+      {text}
+    </span>
   );
 }
 
@@ -720,67 +1673,137 @@ const ocrFieldTargets: Partial<Record<OcrKeyFieldKey, MappingTarget>> = {
   settlementAmount: 'settlementAmount',
 };
 
-function MethodComparison({ rows, ocr, onEvidence }: {
+function MethodComparison({
+  rows,
+  ocr,
+  onEvidence,
+}: {
   rows: ReviewRow[];
   ocr: OcrExtractionResult;
   onEvidence: (evidence: OcrFieldEvidence) => void;
 }) {
-  const comparisons = Object.entries(ocrFieldTargets).flatMap(([key, target]) => {
-    if (!target) return [];
-    const evidence = ocr.fields[key as OcrKeyFieldKey];
-    const visionValue = rows.find((row) => row.target === target)?.value ?? '';
-    const matches = Boolean(evidence && visionValue && normalizeComparable(target, visionValue) === normalizeComparable(target, evidence.value));
-    return [{ key, target, evidence, visionValue, matches }];
-  });
+  const comparisons = Object.entries(ocrFieldTargets).flatMap(
+    ([key, target]) => {
+      if (!target) return [];
+      const evidence = ocr.fields[key as OcrKeyFieldKey];
+      if (!evidence) return [];
+      const visionValue =
+        rows.find((row) => row.target === target)?.value ?? '';
+      const matches = Boolean(
+        evidence &&
+        visionValue &&
+        normalizeComparable(target, visionValue) ===
+          normalizeComparable(target, evidence.value),
+      );
+      return [{ key, target, evidence, visionValue, matches }];
+    },
+  );
   const conflicts = comparisons.filter((item) => !item.matches).length;
   return (
     <section className="review-section method-comparison">
       <div className="section-heading">
         <div>
           <h3>识别方法对比</h3>
-          <p>视觉 LLM负责业务理解，PaddleOCR提供独立文字与坐标证据；两边不一致时保留原值并进入复核。</p>
+          <p>
+            视觉
+            LLM负责业务理解，PaddleOCR提供独立文字与坐标证据；两边不一致时保留原值并进入复核。
+          </p>
         </div>
         <span className={`detail-count ${conflicts ? 'has-conflict' : ''}`}>
-          {ocr.pages.reduce((sum, page) => sum + page.boxes.length, 0)} 个文字框 · {conflicts} 项冲突 · OCR {Math.round(ocr.durationMs / 1000)} 秒
+          {ocr.pages.reduce((sum, page) => sum + page.boxes.length, 0)} 个文字框
+          · {conflicts} 项冲突 · OCR {Math.round(ocr.durationMs / 1000)} 秒
         </span>
       </div>
       <div className="detail-table-wrap">
         <table className="detail-table comparison-table">
-          <thead><tr><th>业务字段</th><th>视觉 LLM</th><th>PaddleOCR</th><th>交叉结果</th><th>证据</th></tr></thead>
-          <tbody>{comparisons.map((item) => (
-            <tr key={item.key}>
-              <td><strong>{targets.find(([target]) => target === item.target)?.[1] ?? item.target}</strong></td>
-              <td>{item.visionValue || '未识别'}</td>
-              <td>{item.evidence?.value ?? '未提取'}</td>
-              <td><span className={`confidence ${item.matches ? 'confirmed' : 'low conflict'}`}>{item.matches ? '双路一致' : item.evidence ? '识别冲突' : 'OCR缺失'}</span></td>
-              <td>{item.evidence ? <button className="evidence-link" type="button" onClick={() => onEvidence(item.evidence!)}>第 {item.evidence.evidence.page} 页定位</button> : '-'}</td>
+          <thead>
+            <tr>
+              <th>业务字段</th>
+              <th>视觉 LLM</th>
+              <th>PaddleOCR</th>
+              <th>交叉结果</th>
+              <th>证据</th>
             </tr>
-          ))}</tbody>
+          </thead>
+          <tbody>
+            {comparisons.map((item) => (
+              <tr key={item.key}>
+                <td>
+                  <strong>
+                    {targets.find(([target]) => target === item.target)?.[1] ??
+                      item.target}
+                  </strong>
+                </td>
+                <td>{item.visionValue || '未识别'}</td>
+                <td>{item.evidence?.value ?? '未提取'}</td>
+                <td>
+                  <span
+                    className={`confidence ${item.matches ? 'confirmed' : 'low conflict'}`}
+                  >
+                    {item.matches
+                      ? '双路一致'
+                      : item.evidence
+                        ? '识别冲突'
+                        : 'OCR缺失'}
+                  </span>
+                </td>
+                <td>
+                  {item.evidence ? (
+                    <button
+                      className="evidence-link"
+                      type="button"
+                      onClick={() => onEvidence(item.evidence!)}
+                    >
+                      第 {item.evidence.evidence.page} 页定位
+                    </button>
+                  ) : (
+                    '-'
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
     </section>
   );
 }
 
-function hasOcrBlockingIssue(rows: ReviewRow[], ocr: OcrExtractionResult) {
+function hasOcrConflict(rows: ReviewRow[], ocr: OcrExtractionResult) {
   return Object.entries(ocrFieldTargets).some(([key, target]) => {
     if (!target) return false;
     const visionValue = rows.find((row) => row.target === target)?.value ?? '';
     const evidence = ocr.fields[key as OcrKeyFieldKey];
-    return !evidence || !visionValue || normalizeComparable(target, visionValue) !== normalizeComparable(target, evidence.value);
+    if (!evidence || !visionValue) return false;
+    return (
+      normalizeComparable(target, visionValue) !==
+      normalizeComparable(target, evidence.value)
+    );
   });
 }
 
 function normalizeComparable(target: MappingTarget, value: string) {
   const text = String(value ?? '').trim();
-  if (['salesAmount', 'invoiceAmount', 'deductionTotal', 'settlementAmount'].includes(target)) {
+  if (
+    [
+      'salesAmount',
+      'invoiceAmount',
+      'deductionTotal',
+      'settlementAmount',
+    ].includes(target)
+  ) {
     const number = Number(text.replace(/[,，￥¥\s]/g, ''));
     return Number.isFinite(number) ? number.toFixed(2) : text;
   }
   return text.replace(/\s/g, '').toLowerCase();
 }
 
-function EvidenceViewer({ evidence, imageUrl, page, onClose }: {
+function EvidenceViewer({
+  evidence,
+  imageUrl,
+  page,
+  onClose,
+}: {
   evidence: OcrFieldEvidence;
   imageUrl: string;
   page?: OcrPageResult;
@@ -789,21 +1812,44 @@ function EvidenceViewer({ evidence, imageUrl, page, onClose }: {
   if (!page) return null;
   const xs = evidence.evidence.polygon.map(([x]) => x);
   const ys = evidence.evidence.polygon.map(([, y]) => y);
-  const left = Math.min(...xs) / page.width * 100;
-  const top = Math.min(...ys) / page.height * 100;
-  const width = (Math.max(...xs) - Math.min(...xs)) / page.width * 100;
-  const height = (Math.max(...ys) - Math.min(...ys)) / page.height * 100;
+  const left = (Math.min(...xs) / page.width) * 100;
+  const top = (Math.min(...ys) / page.height) * 100;
+  const width = ((Math.max(...xs) - Math.min(...xs)) / page.width) * 100;
+  const height = ((Math.max(...ys) - Math.min(...ys)) / page.height) * 100;
   return (
-    <div className="evidence-modal" role="dialog" aria-modal="true" aria-label="原单证据定位">
+    <div
+      className="evidence-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-label="原单证据定位"
+    >
       <div className="evidence-dialog">
         <div className="evidence-dialog-header">
-          <div><strong>{evidence.label}</strong><span>OCR原文：{evidence.value} · 第 {evidence.evidence.page} 页</span></div>
-          <button type="button" onClick={onClose} aria-label="关闭证据查看"><X size={19} /></button>
+          <div>
+            <strong>{evidence.label}</strong>
+            <span>
+              OCR原文：{evidence.value} · 第 {evidence.evidence.page} 页
+            </span>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭证据查看">
+            <X size={19} />
+          </button>
         </div>
         <div className="evidence-canvas">
           <div className="evidence-page">
-            <img src={imageUrl} alt={`第 ${evidence.evidence.page} 页原始结算单`} />
-            <span className="evidence-box" style={{ left: `${left}%`, top: `${top}%`, width: `${width}%`, height: `${height}%` }} />
+            <img
+              src={imageUrl}
+              alt={`第 ${evidence.evidence.page} 页原始结算单`}
+            />
+            <span
+              className="evidence-box"
+              style={{
+                left: `${left}%`,
+                top: `${top}%`,
+                width: `${width}%`,
+                height: `${height}%`,
+              }}
+            />
           </div>
         </div>
       </div>
@@ -811,34 +1857,149 @@ function EvidenceViewer({ evidence, imageUrl, page, onClose }: {
   );
 }
 
-function ValidationPanel({ rows, items }: { rows: ReviewRow[]; items: VisionLineItem[] }) {
-  const valueFor = (target: MappingTarget) => numberValue(rows.find((row) => row.target === target)?.value);
-  const salesItems = items.filter((item) => /销售|进货/.test(item.section) && (!item.rowType || item.rowType === 'detail'));
-  const feeItems = items.filter((item) => /扣款|费用|费/.test(item.section) && (!item.rowType || item.rowType === 'detail'));
-  const checks = [
-    createCheck('销售金额', sumColumn(salesItems, /销售金额/), valueFor('salesAmount'), '销售明细合计', '本期结算汇总'),
-    createCheck('销售数量', sumColumn(salesItems, /销售数量/), valueFor('salesQuantity'), '销售明细合计', '本期结算汇总'),
-    createCheck('扣款费用', sumColumn(feeItems, /^金额$|费用金额/), valueFor('deductionTotal'), '扣费明细合计', '本期结算汇总'),
+type DynamicFormulaCheck = {
+  id: string;
+  label: string;
+  formula: string;
+  values: string;
+  expected: string;
+  actual: string;
+  status: 'passed' | 'failed' | 'review';
+  detail: string;
+  source: string;
+};
+
+function ValidationPanel({
+  rows,
+  items,
+  result,
+}: {
+  rows: ReviewRow[];
+  items: VisionLineItem[];
+  result: VisionExtractionResult;
+}) {
+  const formulaChecks = readDynamicFormulaChecks(result);
+  const valueFor = (target: MappingTarget) =>
+    numberValue(rows.find((row) => row.target === target)?.value);
+  const salesItems = items.filter(
+    (item) =>
+      /销售|进货/.test(item.section) &&
+      (!item.rowType || item.rowType === 'detail'),
+  );
+  const feeItems = items.filter(
+    (item) =>
+      /扣款|费用|费/.test(item.section) &&
+      (!item.rowType || item.rowType === 'detail'),
+  );
+  const legacyChecks = [
     createCheck(
-      '实付金额',
-      subtract(valueFor('invoiceAmount'), valueFor('deductionTotal')),
-      valueFor('settlementAmount'),
-      '发票金额 - 扣款费用',
+      '销售金额',
+      sumColumn(salesItems, /销售金额/),
+      valueFor('salesAmount'),
+      '销售明细合计',
+      '本期结算汇总',
+    ),
+    createCheck(
+      '销售数量',
+      sumColumn(salesItems, /销售数量/),
+      valueFor('salesQuantity'),
+      '销售明细合计',
+      '本期结算汇总',
+    ),
+    createCheck(
+      '扣款费用',
+      sumColumn(feeItems, /^金额$|费用金额/),
+      valueFor('deductionTotal'),
+      '扣费明细合计',
       '本期结算汇总',
     ),
   ].filter((check): check is ValidationCheck => Boolean(check));
 
-  if (!checks.length) return null;
+  if (!formulaChecks.length && !legacyChecks.length) return null;
   return (
     <section className="review-section validation-section">
-      <div className="section-heading"><div><h3>自动勾稽校验</h3><p>用明细合计反向验证汇总值；不一致时阻断自动确认。</p></div></div>
+      <div className="section-heading">
+        <div>
+          <h3>自动勾稽校验</h3>
+          <p>
+            {formulaChecks.length
+              ? '按当前商场单据中识别出的公式绑定动态字段，并由程序确定性计算。'
+              : '该历史结果没有动态公式，暂以通用明细合计规则提示人工复核。'}
+          </p>
+        </div>
+        {formulaChecks.length > 0 && (
+          <span className="detail-count">
+            动态公式 {formulaChecks.length} 条
+          </span>
+        )}
+      </div>
       <div className="validation-checks">
-        {checks.map((check) => (
-          <div className={check.passed ? 'validation-check passed' : 'validation-check failed'} key={check.label}>
-            {check.passed ? <BadgeCheck size={18} /> : <AlertTriangle size={18} />}
-            <div><strong>{check.label} {check.passed ? '一致' : '不一致'}</strong><small>{check.leftLabel} {formatNumber(check.left)}；{check.rightLabel} {formatNumber(check.right)}</small></div>
-          </div>
-        ))}
+        {formulaChecks.length
+          ? formulaChecks.map((check) => (
+              <div
+                className={`validation-check ${check.status}`}
+                key={check.id}
+              >
+                {check.status === 'passed' ? (
+                  <BadgeCheck size={18} />
+                ) : (
+                  <AlertTriangle size={18} />
+                )}
+                <div>
+                  <strong>
+                    {check.label}{' '}
+                    {check.status === 'passed'
+                      ? '一致'
+                      : check.status === 'failed'
+                        ? '不一致'
+                        : '待复核'}
+                  </strong>
+                  {check.formula && (
+                    <small className="formula-expression">
+                      公式：{check.formula}
+                    </small>
+                  )}
+                  {check.values && <small>代入值：{check.values}</small>}
+                  {(check.expected || check.actual) && (
+                    <small>
+                      单据值：{check.expected || '-'}；计算值：
+                      {check.actual || '-'}
+                    </small>
+                  )}
+                  {check.detail && <small>{check.detail}</small>}
+                  {check.source && (
+                    <small className="formula-source">
+                      证据：{check.source}
+                    </small>
+                  )}
+                </div>
+              </div>
+            ))
+          : legacyChecks.map((check) => (
+              <div
+                className={
+                  check.passed
+                    ? 'validation-check passed'
+                    : 'validation-check failed'
+                }
+                key={check.label}
+              >
+                {check.passed ? (
+                  <BadgeCheck size={18} />
+                ) : (
+                  <AlertTriangle size={18} />
+                )}
+                <div>
+                  <strong>
+                    {check.label} {check.passed ? '一致' : '不一致'}
+                  </strong>
+                  <small>
+                    {check.leftLabel} {formatNumber(check.left)}；
+                    {check.rightLabel} {formatNumber(check.right)}
+                  </small>
+                </div>
+              </div>
+            ))}
       </div>
     </section>
   );
@@ -853,9 +2014,234 @@ type ValidationCheck = {
   passed: boolean;
 };
 
-function createCheck(label: string, left: number | null, right: number | null, leftLabel: string, rightLabel: string): ValidationCheck | null {
+function readDynamicFormulaChecks(
+  result: VisionExtractionResult,
+): DynamicFormulaCheck[] {
+  const extraction = result as unknown as Record<string, unknown>;
+  const dynamicLabels = new Map(
+    (result.dynamicFields ?? []).map((field) => [field.id, field.label]),
+  );
+  const container = extraction.formulaChecks;
+  const candidates = Array.isArray(container)
+    ? container
+    : isRecord(container)
+      ? firstArray(
+          container.checks,
+          container.formulas,
+          container.validations,
+          container.results,
+        )
+      : firstArray(
+          extraction.formulas,
+          extraction.validationChecks,
+          extraction.validations,
+        );
+  if (!candidates) return [];
+
+  return candidates.flatMap((candidate, index) => {
+    if (!isRecord(candidate)) return [];
+    const validation = isRecord(candidate.validation)
+      ? candidate.validation
+      : isRecord(candidate.result)
+        ? candidate.result
+        : {};
+    const fieldValues = isRecord(candidate.fieldValues)
+      ? candidate.fieldValues
+      : isRecord(candidate.operands)
+        ? candidate.operands
+        : {};
+    const label =
+      firstText(candidate.label, candidate.name, candidate.title) ||
+      `动态公式 ${index + 1}`;
+    const formulaValue =
+      candidate.expression ?? candidate.formula ?? candidate.equation;
+    const formula =
+      typeof formulaValue === 'string'
+        ? formulaValue
+        : isRecord(formulaValue)
+          ? formatFormulaNode(formulaValue, dynamicLabels)
+          : '';
+    const expected = displayFormulaValue(
+      candidate.expectedValue ??
+        validation.expected ??
+        candidate.documentValue ??
+        candidate.expected,
+    );
+    const actual = displayFormulaValue(
+      candidate.actualValue ??
+        candidate.computedValue ??
+        validation.computed ??
+        candidate.actual ??
+        candidate.computed,
+    );
+    const passValue =
+      candidate.pass ??
+      candidate.passed ??
+      validation.pass ??
+      validation.passed;
+    const statusText = firstText(
+      candidate.status,
+      validation.status,
+    ).toLowerCase();
+    const status: DynamicFormulaCheck['status'] =
+      /review|pending|待复核|推导/.test(statusText)
+        ? 'review'
+        : /fail|invalid|mismatch|不一致|失败/.test(statusText)
+          ? 'failed'
+          : /pass|success|一致|通过/.test(statusText)
+            ? 'passed'
+            : typeof passValue === 'boolean'
+              ? passValue
+                ? 'passed'
+                : 'failed'
+              : 'review';
+    const issues = [
+      candidate.message,
+      validation.message,
+      candidate.issues,
+      validation.issues,
+    ]
+      .flatMap((value) =>
+        Array.isArray(value)
+          ? value
+          : value === undefined || value === null
+            ? []
+            : [value],
+      )
+      .map(displayFormulaValue)
+      .filter(Boolean)
+      .join('；');
+    const missingRefs = [candidate.missingRefs, validation.missingRefs]
+      .flatMap((value) => (Array.isArray(value) ? value : []))
+      .map(displayFormulaValue)
+      .filter(Boolean);
+    const sourceText = firstText(
+      candidate.sourceText,
+      candidate.evidenceText,
+      candidate.rawText,
+    );
+    const page = displayFormulaValue(candidate.page);
+    return [
+      {
+        id: firstText(candidate.id) || `formula:${index}`,
+        label,
+        formula,
+        values: Object.entries(fieldValues)
+          .map(
+            ([key, value]) =>
+              `${dynamicLabels.get(key) ?? key}=${displayFormulaValue(value)}`,
+          )
+          .join('，'),
+        expected,
+        actual,
+        status,
+        detail: [
+          issues,
+          missingRefs.length ? `缺少字段：${missingRefs.join('、')}` : '',
+        ]
+          .filter(Boolean)
+          .join('；'),
+        source: [page ? `第 ${page} 页` : '', sourceText]
+          .filter(Boolean)
+          .join(' · '),
+      },
+    ];
+  });
+}
+
+function formatFormulaNode(
+  node: Record<string, unknown>,
+  labels: Map<string, string>,
+): string {
+  const type = firstText(node.type);
+  if (type === 'literal') return displayFormulaValue(node.value);
+  if (type === 'ref') {
+    const fieldId = firstText(node.fieldId, node.id);
+    return (
+      firstText(node.label) || labels.get(fieldId) || fieldId || '未知字段'
+    );
+  }
+  if (type === 'sum') {
+    const operands = Array.isArray(node.operands) ? node.operands : [];
+    return operands
+      .map((operand) =>
+        isRecord(operand)
+          ? formatFormulaNode(operand, labels)
+          : displayFormulaValue(operand),
+      )
+      .join(' + ');
+  }
+  if (['add', 'subtract', 'multiply', 'divide'].includes(type)) {
+    const operator =
+      { add: '+', subtract: '-', multiply: '×', divide: '÷' }[type] ?? type;
+    const left = isRecord(node.left)
+      ? formatFormulaNode(node.left, labels)
+      : displayFormulaValue(node.left);
+    const right = isRecord(node.right)
+      ? formatFormulaNode(node.right, labels)
+      : displayFormulaValue(node.right);
+    return `(${left} ${operator} ${right})`;
+  }
+  if (type === 'round') {
+    const operand = isRecord(node.operand)
+      ? formatFormulaNode(node.operand, labels)
+      : displayFormulaValue(node.operand);
+    return `ROUND(${operand}, ${displayFormulaValue(node.decimals ?? 2)})`;
+  }
+  return displayFormulaValue(node.expression ?? node.label ?? node);
+}
+
+function firstArray(...values: unknown[]): unknown[] | null {
+  return (values.find(Array.isArray) as unknown[] | undefined) ?? null;
+}
+
+function firstText(...values: unknown[]): string {
+  const value = values.find((item) => typeof item === 'string' && item.trim());
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function displayFormulaValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  )
+    return String(value);
+  if (Array.isArray(value))
+    return value.map(displayFormulaValue).filter(Boolean).join('、');
+  if (isRecord(value)) {
+    const message = firstText(value.message, value.code, value.label);
+    if (message) return message;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function createCheck(
+  label: string,
+  left: number | null,
+  right: number | null,
+  leftLabel: string,
+  rightLabel: string,
+): ValidationCheck | null {
   if (left === null || right === null) return null;
-  return { label, left, right, leftLabel, rightLabel, passed: Math.abs(left - right) <= 0.01 };
+  return {
+    label,
+    left,
+    right,
+    leftLabel,
+    rightLabel,
+    passed: Math.abs(left - right) <= 0.01,
+  };
 }
 
 function numberValue(value: unknown): number | null {
@@ -864,7 +2250,10 @@ function numberValue(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function sumColumn(items: VisionLineItem[], columnPattern: RegExp): number | null {
+function sumColumn(
+  items: VisionLineItem[],
+  columnPattern: RegExp,
+): number | null {
   const values = items.flatMap((item) =>
     Object.entries(item.values)
       .filter(([column]) => columnPattern.test(column))
@@ -874,10 +2263,9 @@ function sumColumn(items: VisionLineItem[], columnPattern: RegExp): number | nul
   return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
 }
 
-function subtract(left: number | null, right: number | null) {
-  return left === null || right === null ? null : left - right;
-}
-
 function formatNumber(value: number) {
-  return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+  return new Intl.NumberFormat('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }

@@ -57,6 +57,37 @@ describe('recognition comparison', () => {
     expect(fields.salesAmount?.evidence.text).toBe('69843.00');
   });
 
+  it('distinguishes supplier identity from the printed counter identity', () => {
+    const box = (text: string, y: number) => ({
+      page: 1,
+      text,
+      score: 0.99,
+      polygon: [
+        [10, y],
+        [400, y],
+        [400, y + 25],
+        [10, y + 25],
+      ] as [[number, number], [number, number], [number, number], [number, number]],
+    });
+    const fields = extractOcrKeyFields([
+      {
+        page: 1,
+        width: 1000,
+        height: 1000,
+        boxes: [
+          box('供货商名称：锐力体育（浙江）有限公司', 10),
+          box('供货商编码：29990', 50),
+          box('专柜名称：耐克NIKE', 90),
+          box('专柜编码：1500614', 130),
+        ],
+      },
+    ]);
+
+    expect(fields.brandMerchantName?.value).toBe('锐力体育（浙江）有限公司');
+    expect(fields.brandName?.value).toBe('耐克NIKE');
+    expect(fields.storeCode?.value).toBe('1500614');
+  });
+
   it('prefers a repeated field inside the printed settlement-summary region', () => {
     const box = (text: string, x1: number, y1: number, x2: number, y2: number) => ({
       page: 1, text, score: 0.99,

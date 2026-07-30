@@ -1,5 +1,4 @@
 import * as XLSX from 'xlsx';
-import type { VisionExtractionResult } from '@shared/reconciliation';
 
 export type WorkbookRow = Record<string, string | number | boolean | null>;
 
@@ -268,7 +267,10 @@ const changedFormatHeaders = new Set(
 function splitCombinedLocation(value: string) {
   const text = value.trim();
   for (const separator of ['·', '/', '／']) {
-    const parts = text.split(separator).map((item) => item.trim()).filter(Boolean);
+    const parts = text
+      .split(separator)
+      .map((item) => item.trim())
+      .filter(Boolean);
     if (parts.length >= 2) {
       return { mallName: parts[0], storeName: parts.slice(1).join(separator) };
     }
@@ -284,9 +286,7 @@ function splitCombinedLocation(value: string) {
   return { mallName: text, storeName: '' };
 }
 
-export function inferBillMetadata(
-  profile: FileProfile,
-): InferredBillMetadata {
+export function inferBillMetadata(profile: FileProfile): InferredBillMetadata {
   const mallColumn = guessColumn(profile.headers, 'mallName');
   const storeColumn = guessColumn(profile.headers, 'storeName');
   const storeCodeColumn = guessColumn(profile.headers, 'storeCode');
@@ -327,12 +327,17 @@ async function readPdfTable(file: File): Promise<FileProfile> {
     isEvalSupported: false,
   }).promise;
   const lines: Array<{ page: number; y: number; cells: string[] }> = [];
-  for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
+  for (
+    let pageNumber = 1;
+    pageNumber <= pdfDocument.numPages;
+    pageNumber += 1
+  ) {
     const page = await pdfDocument.getPage(pageNumber);
     const content = await page.getTextContent();
     const grouped = new Map<number, Array<{ x: number; text: string }>>();
     for (const item of content.items) {
-      if (!('str' in item) || !item.str.trim() || !('transform' in item)) continue;
+      if (!('str' in item) || !item.str.trim() || !('transform' in item))
+        continue;
       const transform = item.transform as number[];
       const y = Math.round((transform[5] ?? 0) / 3) * 3;
       const row = grouped.get(y) ?? [];
@@ -342,7 +347,11 @@ async function readPdfTable(file: File): Promise<FileProfile> {
     for (const [y, cells] of grouped) {
       const ordered = cells.sort((left, right) => left.x - right.x);
       if (ordered.length >= 2) {
-        lines.push({ page: pageNumber, y, cells: ordered.map((item) => item.text) });
+        lines.push({
+          page: pageNumber,
+          y,
+          cells: ordered.map((item) => item.text),
+        });
       }
     }
   }
@@ -353,16 +362,21 @@ async function readPdfTable(file: File): Promise<FileProfile> {
     .map((line, index) => ({
       ...line,
       index,
-      score: line.cells.filter((cell) => normalizedAliases.has(normalize(cell))).length,
+      score: line.cells.filter((cell) => normalizedAliases.has(normalize(cell)))
+        .length,
     }))
     .filter((line) => line.cells.length >= 2)
-    .sort((left, right) => right.score - left.score || left.index - right.index);
+    .sort(
+      (left, right) => right.score - left.score || left.index - right.index,
+    );
   const headerLine = candidates[0];
   if (!headerLine || headerLine.score < 1) {
-    throw new Error('PDF 中未识别到可映射的表格表头。请使用可复制文字的 PDF，或转为 Excel 后导入。');
+    throw new Error(
+      'PDF 中未识别到可映射的表格表头。请使用可复制文字的 PDF，或转为 Excel 后导入。',
+    );
   }
-  const headers = headerLine.cells.map((header, index) =>
-    header || `列${index + 1}`,
+  const headers = headerLine.cells.map(
+    (header, index) => header || `列${index + 1}`,
   );
   // 多页账单后续页会重复打印表头，按表头内容跳过这些行，其余页的数据行全部纳入。
   const headerKey = headers.map(normalize).join('|');
@@ -380,7 +394,9 @@ async function readPdfTable(file: File): Promise<FileProfile> {
     )
     .filter((row) => Object.values(row).some(Boolean));
   if (!rows.length) {
-    throw new Error('PDF 已识别表头，但未识别到数据行。请使用表格型 PDF，或转为 Excel 后导入。');
+    throw new Error(
+      'PDF 已识别表头，但未识别到数据行。请使用表格型 PDF，或转为 Excel 后导入。',
+    );
   }
   return {
     fileName: file.name,
@@ -404,7 +420,7 @@ export async function readWorkbook(file: File): Promise<FileProfile> {
     {
       type: extension === 'csv' ? 'string' : 'array',
       codepage: 65001,
-    cellDates: true,
+      cellDates: true,
     },
   );
   const sheetName = workbook.SheetNames[0];
@@ -435,18 +451,6 @@ export async function readWorkbook(file: File): Promise<FileProfile> {
   };
 }
 
-export function profileFromVisionExtraction(
-  result: VisionExtractionResult,
-): FileProfile {
-  return {
-    fileName: result.fileName,
-    sheetName: '视觉识别结果',
-    headers: result.headers,
-    rows: result.rows,
-    sourceType: 'vision_llm',
-  };
-}
-
 export async function renderPdfPagesForVision(
   file: File,
   maxPages = 2,
@@ -459,7 +463,11 @@ export async function renderPdfPagesForVision(
     isEvalSupported: false,
   }).promise;
   const pages: File[] = [];
-  for (let pageNumber = 1; pageNumber <= Math.min(pdfDocument.numPages, maxPages); pageNumber += 1) {
+  for (
+    let pageNumber = 1;
+    pageNumber <= Math.min(pdfDocument.numPages, maxPages);
+    pageNumber += 1
+  ) {
     const page = await pdfDocument.getPage(pageNumber);
     // Financial amounts are often small text inside dense tables. Preserve enough pixels for VLM reading.
     const viewport = page.getViewport({ scale: 3 });
@@ -511,23 +519,38 @@ export async function renderPdfTilesForVision(
     const tileWidth = Math.ceil(canvas.width / columns);
     const tileHeight = Math.ceil(canvas.height / rows);
     for (let row = 0; row < rows && tiles.length < maxTiles; row += 1) {
-      for (let column = 0; column < columns && tiles.length < maxTiles; column += 1) {
+      for (
+        let column = 0;
+        column < columns && tiles.length < maxTiles;
+        column += 1
+      ) {
         const tile = document.createElement('canvas');
         tile.width = Math.min(tileWidth, canvas.width - column * tileWidth);
         tile.height = Math.min(tileHeight, canvas.height - row * tileHeight);
-        tile.getContext('2d')?.drawImage(
-          canvas,
-          column * tileWidth,
-          row * tileHeight,
-          tile.width,
-          tile.height,
-          0,
-          0,
-          tile.width,
-          tile.height,
+        tile
+          .getContext('2d')
+          ?.drawImage(
+            canvas,
+            column * tileWidth,
+            row * tileHeight,
+            tile.width,
+            tile.height,
+            0,
+            0,
+            tile.width,
+            tile.height,
+          );
+        const blob = await new Promise<Blob | null>((resolve) =>
+          tile.toBlob(resolve, 'image/jpeg', 0.9),
         );
-        const blob = await new Promise<Blob | null>((resolve) => tile.toBlob(resolve, 'image/jpeg', 0.9));
-        if (blob) tiles.push(new File([blob], `${file.name}-p${pageNumber}-${row}-${column}.jpg`, { type: 'image/jpeg' }));
+        if (blob)
+          tiles.push(
+            new File(
+              [blob],
+              `${file.name}-p${pageNumber}-${row}-${column}.jpg`,
+              { type: 'image/jpeg' },
+            ),
+          );
       }
     }
   }
