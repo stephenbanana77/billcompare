@@ -72,6 +72,37 @@ const isTransientUpstreamError = (error: unknown) => {
   );
 };
 
+const toVisionProviderException = (error: unknown) => {
+  const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+  const code = axios.isAxiosError(error) ? error.code : undefined;
+  if (status === 401 || status === 403) {
+    return new BadRequestException(
+      '视觉模型 API Key 无效或没有模型调用权限，请检查企业后台的 Key、额度和模型授权。',
+    );
+  }
+  if (status === 404) {
+    return new BadRequestException(
+      '视觉模型请求地址不正确，请检查 VISION_LLM_BASE_URL 是否为 OpenAI 兼容地址。',
+    );
+  }
+  if (status === 429) {
+    return new BadRequestException(
+      '视觉模型调用频率或额度已达到限制，请稍后重试或检查企业额度。',
+    );
+  }
+  if (typeof status === 'number' && status >= 500) {
+    return new BadRequestException(
+      '视觉模型服务暂时不可用，请稍后重试。',
+    );
+  }
+  if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+    return new BadRequestException(
+      '视觉模型请求超时，请稍后重试。',
+    );
+  }
+  return new BadRequestException('视觉模型服务调用失败，请检查模型配置。');
+};
+
 const parseModelJson = <T>(content: string): T => {
   let normalized = content.trim().replace(/^\uFEFF/, '');
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(normalized);
@@ -245,7 +276,7 @@ export class VisionExtractionService {
       } catch (error) {
         lastError = error;
         if (attempt >= this.config.maxRetries || !isTransientUpstreamError(error)) {
-          throw error;
+          throw toVisionProviderException(error);
         }
         const delayMs = this.config.retryDelayMs * (2 ** attempt);
         if (delayMs > 0) {

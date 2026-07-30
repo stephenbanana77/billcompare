@@ -121,6 +121,56 @@ describe('VisionExtractionService', () => {
     process.env.VISION_LLM_PRIMARY_MAX_TOKENS = originalPrimaryTokens;
   });
 
+  it('returns a redacted provider auth error instead of leaking request headers', async () => {
+    const post = jest.fn().mockRejectedValue({
+      isAxiosError: true,
+      response: {
+        status: 401,
+        data: {
+          error: {
+            message: 'Invalid token',
+          },
+        },
+      },
+      config: {
+        headers: {
+          Authorization: 'Bearer secret-key',
+        },
+      },
+    });
+    const create = jest.spyOn(axios, 'create').mockReturnValue({ post } as never);
+    const originalBaseUrl = process.env.VISION_LLM_BASE_URL;
+    const originalApiKey = process.env.VISION_LLM_API_KEY;
+    const originalRetries = process.env.VISION_LLM_MAX_RETRIES;
+    process.env.VISION_LLM_BASE_URL = 'https://example.test/v1';
+    process.env.VISION_LLM_API_KEY = 'secret-key';
+    process.env.VISION_LLM_MAX_RETRIES = '0';
+
+    try {
+      const service = new VisionExtractionService();
+      await expect(service.extractFromImages('bill.pdf', [Buffer.from('image')]))
+        .rejects
+        .toMatchObject({
+          response: {
+            message: expect.stringContaining('API Key'),
+          },
+        });
+      await expect(service.extractFromImages('bill.pdf', [Buffer.from('image')]))
+        .rejects
+        .not
+        .toMatchObject({
+          response: {
+            message: expect.stringContaining('secret-key'),
+          },
+        });
+    } finally {
+      create.mockRestore();
+      process.env.VISION_LLM_BASE_URL = originalBaseUrl;
+      process.env.VISION_LLM_API_KEY = originalApiKey;
+      process.env.VISION_LLM_MAX_RETRIES = originalRetries;
+    }
+  });
+
   it('waits for the primary extraction before starting line-item requests', async () => {
     let primaryFinished = false;
     let detailStartedEarly = false;
