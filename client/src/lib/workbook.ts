@@ -13,6 +13,18 @@ export type FileProfile = {
 
 const dateHeaderPattern =
   /日期|账期|开始|结束|起日|止日|记账日|businessdate|periodfrom|periodto|date/i;
+const pdfWorkerCacheKey = '20260730a';
+
+function configurePdfWorker(
+  pdfjs: typeof import('pdfjs-dist/legacy/build/pdf.mjs'),
+) {
+  const workerUrl = new URL(
+    'pdfjs-dist/legacy/build/pdf.worker.mjs',
+    import.meta.url,
+  );
+  workerUrl.searchParams.set('v', pdfWorkerCacheKey);
+  pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.toString();
+}
 
 const aliases: Record<string, string[]> = {
   mallName: [
@@ -308,10 +320,7 @@ export function inferStoreCode(profile: FileProfile) {
 
 async function readPdfTable(file: File): Promise<FileProfile> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/legacy/build/pdf.worker.mjs',
-    import.meta.url,
-  ).toString();
+  configurePdfWorker(pdfjs);
   const pdfDocument = await pdfjs.getDocument({
     data: new Uint8Array(await file.arrayBuffer()),
     useWorkerFetch: false,
@@ -443,10 +452,7 @@ export async function renderPdfPagesForVision(
   maxPages = 2,
 ): Promise<File[]> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/legacy/build/pdf.worker.mjs',
-    import.meta.url,
-  ).toString();
+  configurePdfWorker(pdfjs);
   const pdfDocument = await pdfjs.getDocument({
     data: new Uint8Array(await file.arrayBuffer()),
     useWorkerFetch: false,
@@ -482,10 +488,7 @@ export async function renderPdfTilesForVision(
   maxTiles = 12,
 ): Promise<File[]> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    'pdfjs-dist/legacy/build/pdf.worker.mjs',
-    import.meta.url,
-  ).toString();
+  configurePdfWorker(pdfjs);
   const pdfDocument = await pdfjs.getDocument({
     data: new Uint8Array(await file.arrayBuffer()),
     useWorkerFetch: false,

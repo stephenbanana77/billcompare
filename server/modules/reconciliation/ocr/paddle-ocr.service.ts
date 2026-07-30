@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -85,7 +86,17 @@ export class PaddleOcrService implements OnModuleDestroy {
 
   private ensureWorker() {
     if (this.worker && !this.worker.killed) return this.worker;
-    const python = resolve(process.env.PADDLEOCR_PYTHON ?? '.runtime/paddleocr/Scripts/python.exe');
+    const defaultPython =
+      process.platform === 'win32'
+        ? '.runtime/paddleocr/Scripts/python.exe'
+        : '.runtime/paddleocr/bin/python';
+    const configuredPython = process.env.PADDLEOCR_PYTHON?.trim();
+    const python = configuredPython || resolve(defaultPython);
+    if (/[\\/]/.test(python) && !existsSync(python)) {
+      throw new ServiceUnavailableException(
+        `PaddleOCR runtime is not installed: ${python}`,
+      );
+    }
     const script = resolve('tools/paddleocr/worker.py');
     const worker = spawn(python, [script], {
       cwd: process.cwd(),
@@ -94,7 +105,13 @@ export class PaddleOcrService implements OnModuleDestroy {
       windowsHide: true,
     });
     createInterface({ input: worker.stdout }).on('line', (line) => this.handleLine(line));
-    worker.on('error', (error) => this.failAll(error));
+    worker.on('error', (error) =>
+      this.failAll(
+        new ServiceUnavailableException(
+          `PaddleOCR runtime failed to start: ${error.message}`,
+        ),
+      ),
+    );
     worker.on('exit', () => {
       this.worker = null;
       this.failAll(new Error('PaddleOCR工作进程已退出。'));

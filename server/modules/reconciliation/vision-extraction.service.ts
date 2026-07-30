@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import axios, { type AxiosInstance } from 'axios';
 import type {
   VisionExtractionResult,
@@ -70,6 +74,36 @@ const isTransientUpstreamError = (error: unknown) => {
     status === 429 ||
     (typeof status === 'number' && status >= 500)
   );
+};
+
+const toVisionUpstreamException = (error: unknown) => {
+  const candidate = error as {
+    code?: string;
+    message?: string;
+    response?: {
+      status?: number;
+      data?: { error?: { message?: string } };
+    };
+  };
+  const status = candidate.response?.status;
+  const upstreamMessage =
+    candidate.response?.data?.error?.message || candidate.message || '';
+  if (status === 401 || status === 403) {
+    return new ServiceUnavailableException(
+      `Vision model authentication failed: ${upstreamMessage || 'invalid API key'}`,
+    );
+  }
+  if (status === 429) {
+    return new ServiceUnavailableException(
+      `Vision model rate limited: ${upstreamMessage || 'too many requests'}`,
+    );
+  }
+  if (typeof status === 'number' && status >= 500) {
+    return new ServiceUnavailableException(
+      `Vision model upstream error: ${upstreamMessage || `HTTP ${status}`}`,
+    );
+  }
+  return error;
 };
 
 const parseModelJson = <T>(content: string): T => {
@@ -245,7 +279,7 @@ export class VisionExtractionService {
       } catch (error) {
         lastError = error;
         if (attempt >= this.config.maxRetries || !isTransientUpstreamError(error)) {
-          throw error;
+          throw toVisionUpstreamException(error);
         }
         const delayMs = this.config.retryDelayMs * (2 ** attempt);
         if (delayMs > 0) {

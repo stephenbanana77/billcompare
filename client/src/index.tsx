@@ -12,11 +12,12 @@ import { createPortal } from 'react-dom';
 import { Toaster } from '@client/src/components/ui/sonner';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
+const LEGACY_APP_BASE_PATH = '/app/app_17a7d7fdmvg';
 const CLIENT_BASE_PATH = window.location.pathname.startsWith(
-  '/app/app_17a7d7fdmvg',
+  LEGACY_APP_BASE_PATH,
 )
-  ? '/app/app_17a7d7fdmvg'
-  : process.env.CLIENT_BASE_PATH || '/';
+  ? LEGACY_APP_BASE_PATH
+  : '/';
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 15_000, retry: 1 } },
 });

@@ -9,7 +9,9 @@ import { ViewModule } from './modules/view/view.module';
 @Module({
   imports: [
     // 平台 Module，提供平台能力
-    PlatformModule.forRoot(),
+    PlatformModule.forRoot({
+      enableCsrf: process.env.DISABLE_CSRF !== '1',
+    }),
     // ====== @route-section: business-modules START ======
     ReconciliationModule,
     // ====== @route-section: business-modules END ======
