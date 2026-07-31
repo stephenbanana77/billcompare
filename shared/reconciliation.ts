@@ -412,6 +412,10 @@ export interface ConfirmSettlementBillInput {
   reviewedFields: ConfirmedFieldValue[];
   confirmationKey: string;
   clientReportedOcrVerified: boolean;
+  qualityReview?: {
+    acknowledged: boolean;
+    note?: string;
+  };
 }
 
 export type ConfirmedSettlementStatus = 'confirmed' | 'superseded' | 'revoked';
@@ -446,6 +450,33 @@ export interface ConfirmedSettlementDetail {
   extraction: VisionExtractionResult;
   salesLines: VisionLineItem[];
   feeLines: VisionLineItem[];
+  dynamicLines: VisionLineItem[];
+  reviewAudit?: SettlementReviewAudit;
+}
+
+export interface SettlementReviewIssue {
+  code: string;
+  severity: 'warning' | 'blocking';
+  message: string;
+  fieldId?: string;
+}
+
+export interface SettlementManualEdit {
+  target: string;
+  label: string;
+  originalValue: string | number | null;
+  reviewedValue: string | number | null;
+}
+
+export interface SettlementReviewAudit {
+  issueCount: number;
+  issues: SettlementReviewIssue[];
+  manualEditCount: number;
+  manualEdits: SettlementManualEdit[];
+  acknowledgementRequired: boolean;
+  acknowledgedByClient: boolean;
+  acknowledgementNote: string | null;
+  createdAt: string;
 }
 
 export interface SettlementAnalysisFilters {
@@ -513,4 +544,6 @@ export interface SettlementAnalysisDetail {
   warnings: string[];
   salesLines: VisionLineItem[];
   feeLines: VisionLineItem[];
+  dynamicLines: VisionLineItem[];
+  reviewAudit?: SettlementReviewAudit;
 }

@@ -41,6 +41,8 @@ export class SettlementAnalysisService {
       warnings: detail.extraction.warnings,
       salesLines: detail.salesLines,
       feeLines: detail.feeLines,
+      dynamicLines: detail.dynamicLines,
+      reviewAudit: detail.reviewAudit,
     };
   }
 

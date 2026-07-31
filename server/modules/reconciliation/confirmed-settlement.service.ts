@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  BadRequestException,
   ConflictException,
   Inject,
   Injectable,
@@ -14,12 +15,17 @@ import type {
   ConfirmSettlementBillInput,
   ConfirmedSettlementBill,
   ConfirmedSettlementDetail,
+  SettlementManualEdit,
+  SettlementReviewAudit,
+  SettlementReviewIssue,
   VisionExtractionResult,
   VisionLineItem,
 } from '../../../shared/reconciliation';
 import {
   reconciliationConfirmedBills,
+  reconciliationConfirmedDynamicLines,
   reconciliationConfirmedFeeLines,
+  reconciliationConfirmedReviewAudits,
   reconciliationConfirmedSalesLines,
 } from '../../database/reconciliation.schema';
 import { mapConfirmedSettlement } from './confirmed-settlement.mapper';
@@ -33,7 +39,8 @@ export interface ConfirmedSettlementListFilters {
 
 type StoredLine =
   | typeof reconciliationConfirmedSalesLines.$inferSelect
-  | typeof reconciliationConfirmedFeeLines.$inferSelect;
+  | typeof reconciliationConfirmedFeeLines.$inferSelect
+  | typeof reconciliationConfirmedDynamicLines.$inferSelect;
 
 type BillIdentity = Pick<
   typeof reconciliationConfirmedBills.$inferSelect,
@@ -53,6 +60,15 @@ export class ConfirmedSettlementService {
     input: ConfirmSettlementBillInput,
   ): Promise<ConfirmedSettlementDetail> {
     const mapped = mapConfirmedSettlement(input);
+    const reviewAudit = buildReviewAudit(input);
+    if (
+      reviewAudit.acknowledgementRequired &&
+      !reviewAudit.acknowledgedByClient
+    ) {
+      throw new BadRequestException(
+        'qualityReview acknowledgement is required before confirming a settlement with review issues',
+      );
+    }
     const identity = [
       mapped.bill.mallName,
       mapped.bill.storeCode,
@@ -156,6 +172,20 @@ export class ConfirmedSettlementService {
         await tx.insert(reconciliationConfirmedFeeLines).values(feeLines);
       }
 
+      const dynamicLines = this.dynamicLineValues(billId, mapped.dynamicLines);
+      if (dynamicLines.length) {
+        await tx
+          .insert(reconciliationConfirmedDynamicLines)
+          .values(dynamicLines);
+      }
+
+      await tx.insert(reconciliationConfirmedReviewAudits).values({
+        id: randomUUID(),
+        billId,
+        ...reviewAudit,
+        createdAt: confirmedAt,
+      });
+
       return billId;
     });
 
@@ -208,7 +238,7 @@ export class ConfirmedSettlementService {
       throw new NotFoundException(`confirmed settlement ${id} not found`);
     }
 
-    const [salesRows, feeRows] = await Promise.all([
+    const [salesRows, feeRows, dynamicRows, reviewRows] = await Promise.all([
       this.db
         .select()
         .from(reconciliationConfirmedSalesLines)
@@ -219,6 +249,16 @@ export class ConfirmedSettlementService {
         .from(reconciliationConfirmedFeeLines)
         .where(eq(reconciliationConfirmedFeeLines.billId, id))
         .orderBy(asc(reconciliationConfirmedFeeLines.sequence)),
+      this.db
+        .select()
+        .from(reconciliationConfirmedDynamicLines)
+        .where(eq(reconciliationConfirmedDynamicLines.billId, id))
+        .orderBy(asc(reconciliationConfirmedDynamicLines.sequence)),
+      this.db
+        .select()
+        .from(reconciliationConfirmedReviewAudits)
+        .where(eq(reconciliationConfirmedReviewAudits.billId, id))
+        .limit(1),
     ]);
 
     return {
@@ -227,6 +267,12 @@ export class ConfirmedSettlementService {
       extraction: bill.extractionPayload,
       salesLines: this.restoreLines(salesRows, bill.extractionPayload, 'sales'),
       feeLines: this.restoreLines(feeRows, bill.extractionPayload, 'fee'),
+      dynamicLines: dynamicRows.length
+        ? this.restoreDynamicLines(dynamicRows)
+        : bill.extractionPayload.lineItems,
+      reviewAudit: reviewRows[0]
+        ? this.toReviewAudit(reviewRows[0])
+        : undefined,
     };
   }
 
@@ -235,6 +281,22 @@ export class ConfirmedSettlementService {
       id: randomUUID(),
       billId,
       sequence: index + 1,
+      label: line.label,
+      rowType: line.rowType ?? 'detail',
+      values: line.values,
+      rawText: line.rawText,
+      sourcePage: line.page,
+      confidence:
+        typeof line.confidence === 'number' ? String(line.confidence) : null,
+    }));
+  }
+
+  private dynamicLineValues(billId: string, lines: VisionLineItem[]) {
+    return lines.map((line, index) => ({
+      id: randomUUID(),
+      billId,
+      sequence: index + 1,
+      section: line.section,
       label: line.label,
       rowType: line.rowType ?? 'detail',
       values: line.values,
@@ -293,4 +355,107 @@ export class ConfirmedSettlementService {
       confidence: row.confidence === null ? null : Number(row.confidence),
     }));
   }
+
+  private restoreDynamicLines(rows: StoredLine[]): VisionLineItem[] {
+    return rows.map((row) => ({
+      section: 'section' in row ? row.section : '',
+      label: row.label,
+      rowType: row.rowType as VisionLineItem['rowType'],
+      sequence: row.sequence,
+      values: row.values,
+      rawText: row.rawText,
+      page: row.sourcePage,
+      confidence: row.confidence === null ? null : Number(row.confidence),
+    }));
+  }
+
+  private toReviewAudit(
+    row: typeof reconciliationConfirmedReviewAudits.$inferSelect,
+  ): SettlementReviewAudit {
+    return {
+      issueCount: row.issueCount,
+      issues: row.issues,
+      manualEditCount: row.manualEditCount,
+      manualEdits: row.manualEdits,
+      acknowledgementRequired: row.acknowledgementRequired,
+      acknowledgedByClient: row.acknowledgedByClient,
+      acknowledgementNote: row.acknowledgementNote,
+      createdAt: row.createdAt,
+    };
+  }
 }
+
+const normalizeReviewValue = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  return String(value).trim();
+};
+
+const sourceValueForTarget = (
+  extraction: VisionExtractionResult,
+  target: string,
+): string | number | null | undefined => {
+  if (target in extraction.metadata) {
+    return extraction.metadata[target as keyof VisionExtractionResult['metadata']];
+  }
+  const evidenceValue =
+    extraction.evidence[target as keyof VisionExtractionResult['evidence']]
+      ?.value;
+  if (evidenceValue !== undefined) return evidenceValue;
+  const additional = extraction.additionalFields.find(
+    (field) => field.suggestedTarget === target,
+  );
+  return additional?.value;
+};
+
+const buildReviewAudit = (
+  input: ConfirmSettlementBillInput,
+): Omit<SettlementReviewAudit, 'createdAt'> => {
+  const issues: SettlementReviewIssue[] = [];
+  for (const warning of input.extraction.warnings) {
+    if (warning.trim()) {
+      issues.push({
+        code: 'recognition_warning',
+        severity: 'blocking',
+        message: warning,
+      });
+    }
+  }
+  for (const check of input.extraction.formulaChecks ?? []) {
+    if (check.status === 'passed') continue;
+    issues.push({
+      code: `formula_${check.status}`,
+      severity: 'blocking',
+      message: `${check.label}: ${check.expression}`,
+      fieldId: check.id,
+    });
+  }
+
+  const manualEdits: SettlementManualEdit[] = [];
+  for (const field of input.reviewedFields) {
+    const target = field.target.trim();
+    if (!target) continue;
+    const originalValue = sourceValueForTarget(input.extraction, target);
+    if (originalValue === undefined) continue;
+    if (
+      normalizeReviewValue(originalValue) !== normalizeReviewValue(field.value)
+    ) {
+      manualEdits.push({
+        target,
+        label: field.label,
+        originalValue,
+        reviewedValue: field.value,
+      });
+    }
+  }
+
+  const note = input.qualityReview?.note?.trim() || null;
+  return {
+    issueCount: issues.length,
+    issues,
+    manualEditCount: manualEdits.length,
+    manualEdits,
+    acknowledgementRequired: issues.length > 0,
+    acknowledgedByClient: Boolean(input.qualityReview?.acknowledged),
+    acknowledgementNote: note,
+  };
+};

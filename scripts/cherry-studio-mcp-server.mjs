@@ -37,7 +37,7 @@ server.registerTool(
   {
     title: 'Get confirmed settlement bill',
     description:
-      'Get one confirmed settlement bill with reviewed fields, sales lines, and fee lines.',
+      'Get one confirmed settlement bill with reviewed fields, sales lines, fee lines, and all dynamic lines.',
     inputSchema: {
       id: z.string().min(1),
     },

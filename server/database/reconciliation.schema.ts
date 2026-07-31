@@ -21,6 +21,8 @@ import type {
   MailAttachment,
   MoneySnapshot,
   RuleSnapshot,
+  SettlementManualEdit,
+  SettlementReviewIssue,
   VisionExtractionResult,
   VisionLineItem,
   VoucherLine,
@@ -449,6 +451,64 @@ export const reconciliationReceipts = pgTable(
     uniqueIndex('uq_reconciliation_receipts_reference').on(
       table.collectionId,
       table.bankReference,
+    ),
+  ],
+);
+
+export const reconciliationConfirmedDynamicLines = pgTable(
+  'reconciliation_confirmed_dynamic_lines',
+  {
+    id: uuid('id').primaryKey(),
+    billId: uuid('bill_id')
+      .notNull()
+      .references(() => reconciliationConfirmedBills.id, {
+        onDelete: 'cascade',
+      }),
+    sequence: integer('sequence').notNull(),
+    section: varchar('section', { length: 255 }).notNull(),
+    label: varchar('label', { length: 255 }).notNull(),
+    rowType: varchar('row_type', { length: 24 }).notNull(),
+    values: jsonb('values').$type<VisionLineItem['values']>().notNull(),
+    rawText: text('raw_text'),
+    sourcePage: integer('source_page'),
+    confidence: numeric('confidence', { precision: 5, scale: 4 }),
+  },
+  (table) => [
+    unique('uq_confirmed_dynamic_bill_sequence').on(
+      table.billId,
+      table.sequence,
+    ),
+    index('idx_confirmed_dynamic_bill').on(table.billId, table.sequence),
+    index('idx_confirmed_dynamic_section').on(table.billId, table.section),
+  ],
+);
+
+export const reconciliationConfirmedReviewAudits = pgTable(
+  'reconciliation_confirmed_review_audits',
+  {
+    id: uuid('id').primaryKey(),
+    billId: uuid('bill_id')
+      .notNull()
+      .unique()
+      .references(() => reconciliationConfirmedBills.id, {
+        onDelete: 'cascade',
+      }),
+    issueCount: integer('issue_count').notNull(),
+    issues: jsonb('issues').$type<SettlementReviewIssue[]>().notNull(),
+    manualEditCount: integer('manual_edit_count').notNull(),
+    manualEdits: jsonb('manual_edits').$type<SettlementManualEdit[]>().notNull(),
+    acknowledgementRequired: boolean('acknowledgement_required').notNull(),
+    acknowledgedByClient: boolean('acknowledged_by_client').notNull(),
+    acknowledgementNote: text('acknowledgement_note'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index('idx_confirmed_review_audit_bill').on(table.billId),
+    index('idx_confirmed_review_audit_required').on(
+      table.acknowledgementRequired,
+      table.createdAt,
     ),
   ],
 );
