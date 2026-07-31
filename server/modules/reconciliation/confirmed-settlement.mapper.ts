@@ -210,6 +210,7 @@ export const mapConfirmedSettlement = (input: ConfirmSettlementBillInput) => {
       reviewedFields,
       extractionPayload,
     },
+    dynamicLines: extractionPayload.lineItems,
     salesLines: extractionPayload.lineItems.filter(isSalesLine),
     feeLines: extractionPayload.lineItems.filter(isFeeLine),
   };

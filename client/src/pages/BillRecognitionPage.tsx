@@ -755,6 +755,19 @@ export default function BillRecognitionPage() {
 
   const confirmSettlement = async () => {
     if (!result || !fileName || interactionLocked) return;
+    let qualityReview:
+      | { acknowledged: boolean; note: string }
+      | undefined = undefined;
+    if (needsReview) {
+      const note = window.prompt(
+        '当前结算单存在待复核项。请填写复核说明或异常原因后再确认入库：',
+      );
+      if (!note?.trim()) {
+        toast.error('存在待复核项时，必须填写复核说明后才能确认。');
+        return;
+      }
+      qualityReview = { acknowledged: true, note: note.trim() };
+    }
     const billIdentity = getSettlementBillIdentity(fileName, result);
     const confirmationToken =
       requestCoordinator.current.beginConfirmation(billIdentity);
@@ -773,6 +786,7 @@ export default function BillRecognitionPage() {
           value,
         })),
         clientReportedOcrVerified: Boolean(ocrResult) && !ocrHasConflict,
+        ...(qualityReview ? { qualityReview } : {}),
       };
       const detail = await persistSettlementConfirmation(
         input,

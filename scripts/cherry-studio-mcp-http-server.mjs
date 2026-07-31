@@ -163,7 +163,7 @@ function createServer() {
     {
       title: 'Get confirmed settlement bill',
       description:
-        'Get one confirmed settlement bill with reviewed fields, sales lines, and fee lines.',
+        'Get one confirmed settlement bill with reviewed fields, sales lines, fee lines, and all dynamic lines.',
       inputSchema: { id: z.string().min(1) },
     },
     async ({ id }) =>
@@ -255,7 +255,7 @@ async function getDetail(id) {
   `;
   if (!bill) throw new Error(`confirmed settlement ${id} not found`);
 
-  const [salesRows, feeRows] = await Promise.all([
+  const [salesRows, feeRows, dynamicRows, auditRows] = await Promise.all([
     sql`
       SELECT sequence, label, row_type, values, raw_text, source_page, confidence
       FROM reconciliation_confirmed_sales_lines
@@ -268,6 +268,21 @@ async function getDetail(id) {
       WHERE bill_id = ${id}
       ORDER BY sequence
     `,
+    sql`
+      SELECT sequence, section, label, row_type, values, raw_text, source_page,
+             confidence
+      FROM reconciliation_confirmed_dynamic_lines
+      WHERE bill_id = ${id}
+      ORDER BY sequence
+    `,
+    sql`
+      SELECT issue_count, issues, manual_edit_count, manual_edits,
+             acknowledgement_required, acknowledged_by_client,
+             acknowledgement_note, created_at
+      FROM reconciliation_confirmed_review_audits
+      WHERE bill_id = ${id}
+      LIMIT 1
+    `,
   ]);
 
   return {
@@ -277,6 +292,10 @@ async function getDetail(id) {
     warnings: bill.extraction_payload?.warnings ?? [],
     salesLines: salesRows.map(toLine),
     feeLines: feeRows.map(toLine),
+    dynamicLines: dynamicRows.length
+      ? dynamicRows.map(toLine)
+      : bill.extraction_payload?.lineItems ?? [],
+    reviewAudit: auditRows[0] ? toReviewAudit(auditRows[0]) : undefined,
   };
 }
 
@@ -445,7 +464,7 @@ function toBill(row) {
 
 function toLine(row) {
   return {
-    section: '',
+    section: row.section || '',
     label: row.label,
     rowType: row.row_type,
     sequence: row.sequence,
@@ -453,6 +472,19 @@ function toLine(row) {
     rawText: row.raw_text,
     page: row.source_page,
     confidence: row.confidence === null ? null : Number(row.confidence),
+  };
+}
+
+function toReviewAudit(row) {
+  return {
+    issueCount: row.issue_count,
+    issues: row.issues,
+    manualEditCount: row.manual_edit_count,
+    manualEdits: row.manual_edits,
+    acknowledgementRequired: Boolean(row.acknowledgement_required),
+    acknowledgedByClient: Boolean(row.acknowledged_by_client),
+    acknowledgementNote: row.acknowledgement_note,
+    createdAt: toIsoText(row.created_at),
   };
 }
 

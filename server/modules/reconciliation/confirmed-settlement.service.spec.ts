@@ -1,13 +1,15 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { getTableName, type SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { getTableConfig } from 'drizzle-orm/pg-core';
 import type { ConfirmSettlementBillInput } from '../../../shared/reconciliation';
 import {
   reconciliationConfirmedBills,
+  reconciliationConfirmedDynamicLines,
   reconciliationConfirmedFeeLines,
+  reconciliationConfirmedReviewAudits,
   reconciliationConfirmedSalesLines,
 } from '../../database/reconciliation.schema';
 import {
@@ -21,6 +23,14 @@ const columnNames = (columns: Array<{ name?: string }>) =>
 
 const migration = readFileSync(
   join(process.cwd(), 'migrations/007_confirmed_settlement_bills.sql'),
+  'utf8',
+).replace(/\s+/g, ' ');
+
+const dynamicMigration = readFileSync(
+  join(
+    process.cwd(),
+    'migrations/010_confirmed_dynamic_lines_and_review_audits.sql',
+  ),
   'utf8',
 ).replace(/\s+/g, ' ');
 
@@ -110,6 +120,8 @@ class DatabaseDouble {
   readonly billInserts: Array<Record<string, unknown>> = [];
   readonly salesInserts: Array<Record<string, unknown>> = [];
   readonly feeInserts: Array<Record<string, unknown>> = [];
+  readonly dynamicInserts: Array<Record<string, unknown>> = [];
+  readonly reviewAuditInserts: Array<Record<string, unknown>> = [];
   readonly updates: Array<Record<string, unknown>> = [];
   readonly selectWheres: SQL[] = [];
   readonly selectOrders: unknown[][] = [];
@@ -128,16 +140,29 @@ class DatabaseDouble {
         | 'billType'
       >
     | undefined;
-  failOn: 'bill:insert' | 'sales:insert' | 'fee:insert' | undefined;
+  failOn:
+    | 'bill:insert'
+    | 'sales:insert'
+    | 'fee:insert'
+    | 'dynamic:insert'
+    | 'review-audit:insert'
+    | undefined;
   bills: BillRow[] = [];
   salesRows: Array<typeof reconciliationConfirmedSalesLines.$inferSelect> = [];
   feeRows: Array<typeof reconciliationConfirmedFeeLines.$inferSelect> = [];
+  dynamicRows: Array<typeof reconciliationConfirmedDynamicLines.$inferSelect> =
+    [];
+  reviewAuditRows: Array<
+    typeof reconciliationConfirmedReviewAudits.$inferSelect
+  > = [];
   transaction = jest.fn(
     async (callback: (tx: DatabaseDouble) => Promise<string>) => {
       const snapshot = {
         bills: this.billInserts.length,
         sales: this.salesInserts.length,
         fees: this.feeInserts.length,
+        dynamic: this.dynamicInserts.length,
+        reviewAudits: this.reviewAuditInserts.length,
         updates: this.updates.length,
       };
       this.events.push('transaction:start');
@@ -149,6 +174,8 @@ class DatabaseDouble {
         this.billInserts.splice(snapshot.bills);
         this.salesInserts.splice(snapshot.sales);
         this.feeInserts.splice(snapshot.fees);
+        this.dynamicInserts.splice(snapshot.dynamic);
+        this.reviewAuditInserts.splice(snapshot.reviewAudits);
         this.updates.splice(snapshot.updates);
         this.events.push('transaction:rollback');
         throw error;
@@ -226,6 +253,12 @@ class DatabaseDouble {
         } else if (table === reconciliationConfirmedFeeLines) {
           this.feeInserts.push(...rows);
           this.events.push('fee:insert');
+        } else if (table === reconciliationConfirmedDynamicLines) {
+          this.dynamicInserts.push(...rows);
+          this.events.push('dynamic:insert');
+        } else if (table === reconciliationConfirmedReviewAudits) {
+          this.reviewAuditInserts.push(...rows);
+          this.events.push('review-audit:insert');
         }
         const event = this.events.at(-1);
         if (event === this.failOn) throw new Error(`forced ${event} failure`);
@@ -257,6 +290,9 @@ class DatabaseDouble {
     }
     if (table === reconciliationConfirmedSalesLines) return this.salesRows;
     if (table === reconciliationConfirmedFeeLines) return this.feeRows;
+    if (table === reconciliationConfirmedDynamicLines) return this.dynamicRows;
+    if (table === reconciliationConfirmedReviewAudits)
+      return this.reviewAuditRows;
     return [];
   }
 }
@@ -271,6 +307,12 @@ describe('confirmed settlement schema', () => {
     );
     expect(getTableName(reconciliationConfirmedFeeLines)).toBe(
       'reconciliation_confirmed_fee_lines',
+    );
+    expect(getTableName(reconciliationConfirmedDynamicLines)).toBe(
+      'reconciliation_confirmed_dynamic_lines',
+    );
+    expect(getTableName(reconciliationConfirmedReviewAudits)).toBe(
+      'reconciliation_confirmed_review_audits',
     );
   });
 
@@ -348,6 +390,11 @@ describe('confirmed settlement schema', () => {
       'uq_confirmed_sales_bill_sequence',
     ],
     ['fee', reconciliationConfirmedFeeLines, 'uq_confirmed_fee_bill_sequence'],
+    [
+      'dynamic',
+      reconciliationConfirmedDynamicLines,
+      'uq_confirmed_dynamic_bill_sequence',
+    ],
   ])(
     'defines cascade ownership and sequence uniqueness for %s lines',
     (_, table, uniqueName) => {
@@ -440,7 +487,15 @@ describe('ConfirmedSettlementService', () => {
     expect(db.billInserts).toHaveLength(1);
     expect(db.salesInserts).toHaveLength(2);
     expect(db.feeInserts).toHaveLength(2);
-    for (const event of ['bill:insert', 'sales:insert', 'fee:insert']) {
+    expect(db.dynamicInserts).toHaveLength(4);
+    expect(db.reviewAuditInserts).toHaveLength(1);
+    for (const event of [
+      'bill:insert',
+      'sales:insert',
+      'fee:insert',
+      'dynamic:insert',
+      'review-audit:insert',
+    ]) {
       expect(db.events.indexOf('transaction:start')).toBeLessThan(
         db.events.indexOf(event),
       );
@@ -476,6 +531,8 @@ describe('ConfirmedSettlementService', () => {
     expect(db.updates).toHaveLength(0);
     expect(db.salesInserts).toHaveLength(0);
     expect(db.feeInserts).toHaveLength(0);
+    expect(db.dynamicInserts).toHaveLength(0);
+    expect(db.reviewAuditInserts).toHaveLength(0);
   });
 
   it('rejects a reused confirmation key when the logical bill identity differs', async () => {
@@ -525,6 +582,120 @@ describe('ConfirmedSettlementService', () => {
     invalid.fileName = '   ';
 
     await expect(service.confirm(invalid)).rejects.toThrow('fileName');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('allows acknowledged review issues and records the quality audit', async () => {
+    const db = new DatabaseDouble();
+    const service = createService(db);
+    const reviewed = input();
+    reviewed.qualityReview = {
+      acknowledged: true,
+      note: 'Mall bill total needs finance review before ERP closing.',
+    };
+    reviewed.extraction.warnings = ['Formula check needs review'];
+    reviewed.extraction.formulaChecks = [
+      {
+        id: 'formula-1',
+        label: 'Settlement amount check',
+        expression: 'sales - fees = settlement',
+        formula: { type: 'literal', value: 120 },
+        expected: 113,
+        fieldValues: {},
+        sourceText: 'total check failed',
+        page: 1,
+        status: 'failed',
+        validation: {
+          computed: 120,
+          expected: 113,
+          difference: 7,
+          pass: false,
+          missingRefs: [],
+          issues: [],
+        },
+      },
+    ];
+
+    await service.confirm(reviewed);
+
+    expect(db.reviewAuditInserts[0]).toMatchObject({
+      issueCount: 2,
+      acknowledgementRequired: true,
+      acknowledgedByClient: true,
+      acknowledgementNote: 'Mall bill total needs finance review before ERP closing.',
+    });
+  });
+
+  it('records reviewed field edits for pilot intervention metrics', async () => {
+    const db = new DatabaseDouble();
+    const service = createService(db);
+    const reviewed = input();
+    reviewed.extraction.evidence.salesAmount = {
+      value: '118.00',
+      rawText: 'sales 118.00',
+      page: 1,
+      confidence: 0.92,
+    };
+
+    await service.confirm(reviewed);
+
+    expect(db.reviewAuditInserts[0]).toMatchObject({
+      manualEditCount: 1,
+    });
+    expect(db.reviewAuditInserts[0].manualEdits).toEqual([
+      expect.objectContaining({
+        target: 'salesAmount',
+        originalValue: '118.00',
+        reviewedValue: '120.00',
+      }),
+    ]);
+  });
+
+  it('keeps migration 010 aligned with dynamic detail and review audit storage', () => {
+    expect(dynamicMigration).toContain(
+      'CREATE TABLE IF NOT EXISTS reconciliation_confirmed_dynamic_lines',
+    );
+    expect(dynamicMigration).toContain(
+      'CONSTRAINT uq_confirmed_dynamic_bill_sequence UNIQUE (bill_id, sequence)',
+    );
+    expect(dynamicMigration).toContain(
+      'CREATE TABLE IF NOT EXISTS reconciliation_confirmed_review_audits',
+    );
+    expect(dynamicMigration).toContain(
+      'bill_id uuid NOT NULL UNIQUE REFERENCES reconciliation_confirmed_bills(id) ON DELETE CASCADE',
+    );
+    expect(dynamicMigration).toContain('acknowledgement_required boolean NOT NULL');
+  });
+
+  it('rejects confirmation with unresolved formula issues before opening a transaction', async () => {
+    const db = new DatabaseDouble();
+    const service = new ConfirmedSettlementService(db as never);
+    const invalid = input();
+    invalid.extraction.formulaChecks = [
+      {
+        id: 'formula-1',
+        label: 'Settlement amount check',
+        expression: 'sales - fees = settlement',
+        formula: { type: 'literal', value: 120 },
+        expected: 113,
+        fieldValues: {},
+        sourceText: 'total check failed',
+        page: 1,
+        status: 'failed',
+        validation: {
+          computed: 120,
+          expected: 113,
+          difference: 7,
+          pass: false,
+          missingRefs: [],
+          issues: [],
+        },
+      },
+    ];
+
+    await expect(service.confirm(invalid)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
@@ -642,6 +813,8 @@ describe('ConfirmedSettlementService', () => {
     expect(db.billInserts).toHaveLength(0);
     expect(db.salesInserts).toHaveLength(0);
     expect(db.feeInserts).toHaveLength(0);
+    expect(db.dynamicInserts).toHaveLength(0);
+    expect(db.reviewAuditInserts).toHaveLength(0);
   });
 
   it('uses the configured demo operator and normalizes duplicate model sequences', async () => {
@@ -751,11 +924,45 @@ describe('ConfirmedSettlementService', () => {
         confidence: '0.9600',
       },
     ];
+    db.dynamicRows = [
+      {
+        id: 'dynamic-id',
+        billId: 'bill-id',
+        sequence: 1,
+        section: 'Adjustment table',
+        label: 'Adjustment one',
+        rowType: 'adjustment',
+        values: { amount: '-3.00' },
+        rawText: 'adjustment one',
+        sourcePage: 3,
+        confidence: '0.9100',
+      },
+    ];
+    db.reviewAuditRows = [
+      {
+        id: 'audit-id',
+        billId: 'bill-id',
+        issueCount: 1,
+        issues: [
+          {
+            code: 'recognition_warning',
+            severity: 'blocking',
+            message: 'Needs review',
+          },
+        ],
+        manualEditCount: 0,
+        manualEdits: [],
+        acknowledgementRequired: true,
+        acknowledgedByClient: true,
+        acknowledgementNote: 'reviewed',
+        createdAt: '2026-07-31T00:00:00.000Z',
+      },
+    ];
     const service = new ConfirmedSettlementService(db as never);
 
     const detail = await service.getById('bill-id');
 
-    expect(db.selectOrders).toHaveLength(2);
+    expect(db.selectOrders).toHaveLength(3);
     expect(detail.reviewedFields).toBe(fixture.reviewedFields);
     expect(detail.extraction).toBe(fixture.extraction);
     expect(detail.salesLines[0]).toMatchObject({
@@ -767,6 +974,16 @@ describe('ConfirmedSettlementService', () => {
       section: '扣款费用明细',
       sequence: 1,
       confidence: 0.96,
+    });
+    expect(detail.dynamicLines[0]).toMatchObject({
+      section: 'Adjustment table',
+      sequence: 1,
+      confidence: 0.91,
+    });
+    expect(detail.reviewAudit).toMatchObject({
+      issueCount: 1,
+      acknowledgementRequired: true,
+      acknowledgementNote: 'reviewed',
     });
   });
 

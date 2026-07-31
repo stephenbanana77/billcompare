@@ -275,6 +275,50 @@ describe('mapConfirmedSettlement', () => {
     ]);
   });
 
+  it('preserves every extracted line as dynamic detail lines', () => {
+    const input = createInput();
+    input.extraction.lineItems = [
+      {
+        section: 'Sales table',
+        label: 'sales-row',
+        rowType: 'detail',
+        sequence: 1,
+        values: { amount: 100 },
+        rawText: null,
+        page: 1,
+        confidence: 0.98,
+      },
+      {
+        section: 'Adjustment table',
+        label: 'dynamic-adjustment-row',
+        rowType: 'adjustment',
+        sequence: 2,
+        values: { amount: -5 },
+        rawText: null,
+        page: 1,
+        confidence: 0.9,
+      },
+      {
+        section: 'Fee table',
+        label: 'fee-row',
+        rowType: 'detail',
+        sequence: 3,
+        values: { amount: 2 },
+        rawText: null,
+        page: 1,
+        confidence: 0.96,
+      },
+    ];
+
+    const mapped = mapConfirmedSettlement(input);
+
+    expect(mapped.dynamicLines.map((line) => line.label)).toEqual([
+      'sales-row',
+      'dynamic-adjustment-row',
+      'fee-row',
+    ]);
+  });
+
   it.each([
     ['salesAmount', ','],
     ['settlementAmount', ','],

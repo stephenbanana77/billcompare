@@ -125,6 +125,20 @@ const assertConfirmationInput: (
   if (typeof input.clientReportedOcrVerified !== 'boolean') {
     invalidRequest('clientReportedOcrVerified must be a boolean');
   }
+  if (input.qualityReview !== undefined) {
+    if (!isRecord(input.qualityReview)) {
+      invalidRequest('qualityReview must be an object');
+    }
+    if (typeof input.qualityReview.acknowledged !== 'boolean') {
+      invalidRequest('qualityReview.acknowledged must be a boolean');
+    }
+    if (
+      input.qualityReview.note !== undefined &&
+      typeof input.qualityReview.note !== 'string'
+    ) {
+      invalidRequest('qualityReview.note must be a string');
+    }
+  }
   if (!Array.isArray(input.reviewedFields)) {
     invalidRequest('reviewedFields must be an array');
   }
