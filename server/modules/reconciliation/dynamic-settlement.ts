@@ -283,6 +283,8 @@ function buildLineItemChecks(
   });
 
   for (const [section, items] of sections) {
+    if (/fee_detail|ocr/i.test(section)) continue;
+    if (!/明细|费用|销售|扣款|费/.test(section)) continue;
     const details = items.filter(
       ({ item }) => !item.rowType || item.rowType === 'detail',
     );

@@ -629,8 +629,6 @@ export class VisionExtractionService {
       this.requestPrimaryResult(primaryPayload),
       this.extractLineItems(images),
     ]);
-    if (primaryAttempt.status === 'rejected') throw primaryAttempt.reason;
-    const primary = primaryAttempt.value;
     const extractedLineItems =
       lineItemsAttempt.status === 'fulfilled'
         ? lineItemsAttempt.value
@@ -640,6 +638,39 @@ export class VisionExtractionService {
               '明细识别未完成：请人工核对原始单据中的销售与费用明细。',
             ],
           };
+    if (
+      primaryAttempt.status === 'rejected' &&
+      !extractedLineItems.items.length
+    ) {
+      throw primaryAttempt.reason;
+    }
+    const primary: ModelResult =
+      primaryAttempt.status === 'fulfilled'
+        ? primaryAttempt.value
+        : {
+            metadata: {
+              mallName: '',
+              storeName: '',
+              storeCode: '',
+              periodStart: '',
+              periodEnd: '',
+              billType: 'changed_format',
+            },
+            periodEvidence: {
+              rawText: null,
+              page: null,
+              kind: 'unknown',
+            },
+            fields: {},
+            additionalFields: [],
+            lineItems: extractedLineItems.items,
+          };
+    const primaryWarnings =
+      primaryAttempt.status === 'rejected'
+        ? [
+            '视觉模型主字段返回格式错误，已降级展示明细识别结果，请人工补全和复核页眉、账期、汇总金额。',
+          ]
+        : [];
     try {
       const lineItems = extractedLineItems.items.length
         ? extractedLineItems.items
@@ -655,7 +686,11 @@ export class VisionExtractionService {
       );
       return enrichDynamicSettlement({
         ...normalized,
-        warnings: [...normalized.warnings, ...extractedLineItems.warnings],
+        warnings: [
+          ...normalized.warnings,
+          ...primaryWarnings,
+          ...extractedLineItems.warnings,
+        ],
       });
     } catch (error) {
       if (error instanceof BadRequestException) throw error;

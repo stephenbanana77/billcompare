@@ -30,7 +30,10 @@ import type {
 } from '@shared/reconciliation';
 import { reconciliationApi } from '@/api';
 import { renderPdfTilesForVision } from '@/lib/workbook';
-import { recognizeSettlementPdf } from '@/lib/settlement-pdf-recognition';
+import {
+  isSettlementPdfFile,
+  recognizeSettlementBill,
+} from '@/lib/settlement-pdf-recognition';
 import {
   confirmedMetadataTargets,
   createSettlementRequestCoordinator,
@@ -46,15 +49,20 @@ import {
 
 type MappingTarget =
   | ''
+  | 'supportingInfo'
   | 'mallName'
   | 'storeName'
   | 'brandName'
   | 'brandMerchantName'
   | 'storeCode'
+  | 'merchantName'
+  | 'leaseUnit'
+  | 'contractNo'
   | 'settlementNo'
   | 'salesQuantity'
   | 'taxAmount'
   | 'netPurchaseAmount'
+  | 'feeLineItem'
   | 'businessMode'
   | 'counterLocation'
   | 'productCategory'
@@ -88,15 +96,20 @@ type ReviewRow = {
 
 const targets: Array<[MappingTarget, string]> = [
   ['', '暂不映射'],
+  ['supportingInfo', '不参与 ERP 对账'],
   ['mallName', '商场名称'],
   ['storeName', '门店名称'],
   ['brandName', '品牌 / 门店'],
   ['brandMerchantName', '品牌商 / 供货单位'],
   ['storeCode', '柜号 / 门店编码'],
+  ['merchantName', '商户名称'],
+  ['leaseUnit', '承租单元'],
+  ['contractNo', '合同号'],
   ['settlementNo', '结算单号'],
   ['salesQuantity', '销售数量'],
   ['taxAmount', '税额'],
   ['netPurchaseAmount', '不含税进价'],
+  ['feeLineItem', '费用明细项'],
   ['businessMode', '结算 / 经营方式'],
   ['counterLocation', '柜场 / 经营场景'],
   ['productCategory', '商品大类'],
@@ -128,6 +141,95 @@ const fieldNames: Record<VisionFieldKey, string> = {
 };
 
 const knownTargets = new Set(targets.map(([target]) => target));
+const isKnownNonEmptyTarget = (
+  target: string | null | undefined,
+): target is Exclude<MappingTarget, ''> =>
+  Boolean(target) && knownTargets.has(target as MappingTarget);
+
+const additionalTargets = new Set<MappingTarget>([
+  'supportingInfo',
+  'businessMode',
+  'counterLocation',
+  'productCategory',
+  'settlementDate',
+  'documentDate',
+  'printSequence',
+  'previousBalance',
+  'merchantName',
+  'leaseUnit',
+  'contractNo',
+  'feeLineItem',
+]);
+const repeatableTargets = new Set<MappingTarget>(['feeLineItem']);
+
+function normalizeFieldLabel(value: string | null | undefined): string {
+  return String(value ?? '')
+    .replace(/\s/g, '')
+    .replace(/[：:]/g, '')
+    .trim();
+}
+
+function isSupportingInfoLabel(value: string | null | undefined): boolean {
+  const label = normalizeFieldLabel(value);
+  return /开户行|银行|户名|账户|账号|帐号|收款方|付款方|收款单位|付款单位/.test(label);
+}
+
+function inferTargetFromLabel(
+  labelValue: string | null | undefined,
+  group?: string | null,
+  valueType?: string | null,
+): MappingTarget {
+  const label = normalizeFieldLabel(labelValue);
+  if (!label) return '';
+  if (/^商户$|商户名称|商户编码|商户信息|商家/.test(label)) {
+    return 'merchantName';
+  }
+  if (/承租单元|租赁单元|铺位|铺号|专柜|柜位|店铺位置/.test(label)) {
+    return 'leaseUnit';
+  }
+  if (/合同号|合同编号|合同编码/.test(label)) return 'contractNo';
+  if (/^品牌$|品牌名称/.test(label)) return 'brandName';
+  if (/品牌商|供货单位|供应商/.test(label)) return 'brandMerchantName';
+  if (/^商场$|商场名称|商场信息名称|购物中心|门店名称/.test(label)) {
+    return 'mallName';
+  }
+  if (/柜号|门店编码|店号|店铺编码/.test(label)) return 'storeCode';
+  if (/结算单号|单据编号|结算编号/.test(label)) return 'settlementNo';
+  if (/经营方式|结算方式|联销方式/.test(label)) return 'businessMode';
+  if (/柜场|经营场景|楼层场地/.test(label)) return 'counterLocation';
+  if (/商品大类|品类|商品类别/.test(label)) return 'productCategory';
+  if (/结算日期/.test(label)) return 'settlementDate';
+  if (/打印时间|制单日期|开单日期/.test(label)) return 'documentDate';
+  if (/打印流水号|打印序号|页码流水/.test(label)) return 'printSequence';
+  if (/上期结算|上期余额|期初余额/.test(label)) return 'previousBalance';
+  if (/销售数量|销量|数量/.test(label)) return 'salesQuantity';
+  if (/税额/.test(label)) return 'taxAmount';
+  if (/不含税进价|进价/.test(label)) return 'netPurchaseAmount';
+  if (/销售返款|返款合计|退款合计|退货合计/.test(label)) {
+    return 'refundAmount';
+  }
+  if (/销售额|销售金额/.test(label)) return 'salesAmount';
+  if (/退款|退货/.test(label)) return 'refundAmount';
+  if (/扣点|佣金|手续费/.test(label)) return 'commissionAmount';
+  if (/活动费/.test(label)) return 'activityFee';
+  if (/开票金额|发票金额/.test(label)) return 'invoiceAmount';
+  if (/租金总计|扣款合计|应收项目合计|应收合计|费用合计|商场应收/.test(label)) {
+    return 'deductionTotal';
+  }
+  if (isSupportingInfoLabel(label)) return 'supportingInfo';
+  if (/税率/.test(label)) return 'taxAmount';
+  if (/应返商户|应付商户|实付|实结|结算金额/.test(label)) {
+    return 'settlementAmount';
+  }
+  if (
+    group === 'fee' ||
+    valueType === 'money' ||
+    /租金|POS费|电费|管理费|耗材费|消杀费|物料|运维费|费用|扣费|扣款/.test(label)
+  ) {
+    return 'feeLineItem';
+  }
+  return '';
+}
 
 function metadataRow(
   source: string,
@@ -150,15 +252,7 @@ function metadataRow(
 
 function additionalRow(field: VisionAdditionalField, index: number): ReviewRow {
   const target = inferAdditionalTarget(field);
-  const additionalTargets = new Set<MappingTarget>([
-    'businessMode',
-    'counterLocation',
-    'productCategory',
-    'settlementDate',
-    'documentDate',
-    'printSequence',
-    'previousBalance',
-  ]);
+  const isSupportingInfo = target === 'supportingInfo' || isSupportingInfoLabel(field.label);
   return {
     id: `additional:${index}`,
     source: field.label || field.rawText || `动态字段 ${index + 1}`,
@@ -179,7 +273,9 @@ function additionalRow(field: VisionAdditionalField, index: number): ReviewRow {
     target,
     value: field.value === null ? '' : String(field.value),
     group:
-      field.group === 'summary'
+      isSupportingInfo
+        ? 'additional'
+        : field.group === 'summary'
         ? 'summary'
         : additionalTargets.has(target)
           ? 'additional'
@@ -189,19 +285,22 @@ function additionalRow(field: VisionAdditionalField, index: number): ReviewRow {
   };
 }
 
+function autoMapReviewRow(row: ReviewRow): ReviewRow {
+  if (row.target) return row;
+  const inferred = inferTargetFromLabel(row.source, row.group, null);
+  if (!inferred) return row;
+  return {
+    ...row,
+    target: inferred,
+    group: additionalTargets.has(inferred) ? 'additional' : row.group,
+  };
+}
+
 function dynamicFieldRow(field: VisionDynamicField, index: number): ReviewRow {
-  const target = knownTargets.has(field.role as MappingTarget)
-    ? (field.role as MappingTarget)
-    : '';
-  const additionalTargets = new Set<MappingTarget>([
-    'businessMode',
-    'counterLocation',
-    'productCategory',
-    'settlementDate',
-    'documentDate',
-    'printSequence',
-    'previousBalance',
-  ]);
+  const target = isKnownNonEmptyTarget(field.role)
+    ? field.role
+    : inferTargetFromLabel(field.label, field.group, field.valueType);
+  const isSupportingInfo = target === 'supportingInfo' || isSupportingInfoLabel(field.label);
   return {
     id: field.id || `dynamic:${index}`,
     source: field.label || `动态字段 ${index + 1}`,
@@ -219,7 +318,9 @@ function dynamicFieldRow(field: VisionDynamicField, index: number): ReviewRow {
     target,
     value: field.value === null ? '' : String(field.value),
     group:
-      field.group === 'summary' || field.group === 'formula'
+      isSupportingInfo
+        ? 'additional'
+        : field.group === 'summary' || field.group === 'formula'
         ? 'summary'
         : additionalTargets.has(target)
           ? 'additional'
@@ -266,20 +367,10 @@ function mergeFeeLineItems(result: VisionExtractionResult): VisionLineItem[] {
 }
 
 function inferAdditionalTarget(field: VisionAdditionalField): MappingTarget {
-  if (knownTargets.has(field.suggestedTarget as MappingTarget)) {
-    return field.suggestedTarget as MappingTarget;
+  if (isKnownNonEmptyTarget(field.suggestedTarget)) {
+    return field.suggestedTarget;
   }
-  const label = field.label.replace(/\s/g, '');
-  if (/^品牌$|品牌名称/.test(label)) return 'brandName';
-  if (/品牌商|供货单位|供应商/.test(label)) return 'brandMerchantName';
-  if (/^商场$|柜场|楼层场地|经营场景/.test(label)) return 'counterLocation';
-  if (/经营方式|结算方式|联销方式/.test(label)) return 'businessMode';
-  if (/商品大类|品类|商品类别/.test(label)) return 'productCategory';
-  if (/结算日期/.test(label)) return 'settlementDate';
-  if (/制单日期|开单日期/.test(label)) return 'documentDate';
-  if (/打印流水号|打印序号|页码流水/.test(label)) return 'printSequence';
-  if (/上期结算|上期余额|期初余额/.test(label)) return 'previousBalance';
-  return '';
+  return inferTargetFromLabel(field.label, field.group, null);
 }
 
 function buildReviewRows(result: VisionExtractionResult): ReviewRow[] {
@@ -379,20 +470,16 @@ function buildReviewRows(result: VisionExtractionResult): ReviewRow[] {
   ];
   const additionalRows: ReviewRow[] = [];
   for (const candidate of sourceRows) {
-    // Every source field stays visible. When two source fields suggest the same
-    // canonical role, keep the first mapping and leave the duplicate for review
-    // instead of silently dropping it or overwriting the confirmed value.
+    const autoMappedCandidate = autoMapReviewRow(candidate);
     const row =
-      candidate.target && occupiedTargets.has(candidate.target)
+      autoMappedCandidate.target &&
+      occupiedTargets.has(autoMappedCandidate.target) &&
+      !repeatableTargets.has(autoMappedCandidate.target)
         ? {
-            ...candidate,
-            target: '' as MappingTarget,
-            group:
-              candidate.group === 'summary'
-                ? ('summary' as ReviewGroup)
-                : ('unmapped' as ReviewGroup),
+            ...autoMappedCandidate,
+            group: 'additional' as ReviewGroup,
           }
-        : candidate;
+        : autoMappedCandidate;
     additionalRows.push(row);
     if (row.target) occupiedTargets.add(row.target);
   }
@@ -468,7 +555,7 @@ function confirmedStatusLabel(status: ConfirmedSettlementBill['status']) {
 
 export default function BillRecognitionPage() {
   const requestCoordinator = useRef(createSettlementRequestCoordinator());
-  const lastRecognitionFile = useRef<File | null>(null);
+  const lastRecognitionFiles = useRef<File[]>([]);
   const historyRequestRevision = useRef(0);
   const [fileName, setFileName] = useState('');
   const [result, setResult] = useState<VisionExtractionResult | null>(null);
@@ -589,17 +676,13 @@ export default function BillRecognitionPage() {
     }
   };
 
-  const recognize = async (file?: File) => {
-    if (!file || interactionLocked) return;
-    setAttemptedFileName(file.name);
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      lastRecognitionFile.current = null;
-      const message = '请上传 PDF 格式的商场结算单。';
-      setRecognitionError(message);
-      toast.error(message);
-      return;
-    }
-    lastRecognitionFile.current = file;
+  const recognize = async (files?: File[]) => {
+    const selected = (files ?? []).filter(Boolean);
+    if (!selected.length || interactionLocked) return;
+    setAttemptedFileName(
+      selected.length === 1 ? selected[0].name : `${selected.length} 张照片`,
+    );
+    lastRecognitionFiles.current = selected;
     setRecognitionError(null);
     const previousBillIdentity =
       requestCoordinator.current.currentBillIdentity();
@@ -608,13 +691,15 @@ export default function BillRecognitionPage() {
     setRecognizing(true);
     let activeBillIdentity: string | null = null;
     try {
-      const { pages, extraction, ocr, ocrWarning } =
-        await recognizeSettlementPdf(file, (stage) => {
+      const { sourceKind, pages, extraction, ocr, ocrWarning } =
+        await recognizeSettlementBill(selected, (stage) => {
           if (!requestCoordinator.current.isRecognitionCurrent(recognitionToken))
             return;
           setRecognitionStage(
             stage === 'rendering'
-              ? '正在渲染单据页面'
+              ? selected.some(isSettlementPdfFile)
+                ? '正在渲染单据页面'
+                : '正在准备照片页面'
               : stage === 'recognizing'
                 ? '正在进行视觉识别和 OCR 校验，通常需要 1-2 分钟'
                 : '识别完成，正在检查金额和证据',
@@ -652,12 +737,15 @@ export default function BillRecognitionPage() {
       if (candidates.length) {
         setRefining(true);
         try {
-          const tiles = await renderPdfTilesForVision(
-            file,
-            candidates.flatMap((candidate) =>
-              candidate.page === null ? [] : [candidate.page],
-            ),
+          const pagesNeeded = candidates.flatMap((candidate) =>
+            candidate.page === null ? [] : [candidate.page],
           );
+          const tiles =
+            sourceKind === 'pdf'
+              ? await renderPdfTilesForVision(selected[0], pagesNeeded)
+              : pagesNeeded
+                  .map((pageNumber) => pages[pageNumber - 1])
+                  .filter((page): page is File => Boolean(page));
           const refinementResult = await reconciliationApi.refineVisionBill(
             candidates,
             tiles,
@@ -868,12 +956,13 @@ export default function BillRecognitionPage() {
                 : '上传结算单'}
           <input
             type="file"
-            accept=".pdf,application/pdf"
+            accept=".pdf,application/pdf,.jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            multiple
             disabled={interactionLocked}
             onChange={(event) => {
-              const file = event.target.files?.[0];
+              const files = Array.from(event.target.files ?? []);
               event.currentTarget.value = '';
-              void recognize(file);
+              void recognize(files);
             }}
           />
         </label>
@@ -902,13 +991,13 @@ export default function BillRecognitionPage() {
                 : ''}
             </p>
           </div>
-          {recognitionError && lastRecognitionFile.current && (
+          {recognitionError && lastRecognitionFiles.current.length > 0 && (
             <button
               className="button secondary"
               type="button"
               disabled={interactionLocked}
               onClick={() =>
-                void recognize(lastRecognitionFile.current ?? undefined)
+                void recognize(lastRecognitionFiles.current)
               }
             >
               <RotateCcw size={16} />
@@ -1487,7 +1576,9 @@ function DetailTable({
                 {columns.map((column) => (
                   <td key={column}>{item.values[column] ?? '-'}</td>
                 ))}
-                <td>第 {item.page ?? '-'} 页</td>
+                <td>
+                  <LineItemSource item={item} />
+                </td>
                 <td>
                   <RefinementBadge
                     item={item}
@@ -1500,6 +1591,15 @@ function DetailTable({
         </table>
       </div>
     </section>
+  );
+}
+
+function LineItemSource({ item }: { item: VisionLineItem }) {
+  return (
+    <div className="line-item-source">
+      <span>第 {item.page ?? '-'} 页</span>
+      {item.rawText?.trim() ? <small>原文：{item.rawText}</small> : null}
+    </div>
   );
 }
 
@@ -1615,7 +1715,9 @@ function FeeDetailTable({
                           </td>
                         );
                       })}
-                      <td>第 {item.page ?? '-'} 页</td>
+                      <td>
+                        <LineItemSource item={item} />
+                      </td>
                       <td>
                         <RefinementBadge
                           item={item}

@@ -1984,6 +1984,24 @@ textarea:focus {
 .detail-table td:first-child {
   min-width: 170px;
 }
+.line-item-source {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+  max-width: 280px;
+}
+.line-item-source span {
+  white-space: nowrap;
+}
+.line-item-source small {
+  overflow: hidden;
+  color: #6f7c78;
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .detail-table tbody tr:last-child td {
   border-bottom: 0;
 }
