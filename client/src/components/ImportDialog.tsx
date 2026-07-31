@@ -110,6 +110,8 @@ export default function ImportDialog({
   const [visionStatus, setVisionStatus] = useState('');
   const [isVisionRecognizing, setIsVisionRecognizing] = useState(false);
   const visionRequestId = useRef(0);
+  const [erpAiSuggested, setErpAiSuggested] = useState(false);
+  const erpSuggestRequestId = useRef(0);
   const [meta, setMeta] = useState({
     mallName: '',
     storeName: '',
@@ -396,6 +398,38 @@ export default function ImportDialog({
     onClose();
   };
 
+  // ERP 表头未命中内置别名时，让服务端复用视觉模型（纯文本）给出映射建议；
+  // 只填补仍为空的映射项，不覆盖用户已做的选择。
+  const suggestErpMapping = async (profile: FileProfile) => {
+    const requestId = erpSuggestRequestId.current + 1;
+    erpSuggestRequestId.current = requestId;
+    try {
+      const { mapping: suggested } = await reconciliationApi.mapErpHeaders({
+        headers: profile.headers,
+        sampleRows: profile.rows.slice(0, 3),
+      });
+      if (erpSuggestRequestId.current !== requestId) return;
+      if (
+        !suggested.transactionDate &&
+        !suggested.salesAmount &&
+        !suggested.refundAmount
+      ) {
+        return;
+      }
+      setErpMap((current) => ({
+        ...current,
+        transactionDate:
+          current.transactionDate || suggested.transactionDate || '',
+        salesAmount: current.salesAmount || suggested.salesAmount || '',
+        refundAmount: current.refundAmount || suggested.refundAmount || '',
+      }));
+      setErpAiSuggested(true);
+      toast.info('ERP 表头未命中内置映射，已按 AI 建议预填，请核对。');
+    } catch {
+      // 模型不可用或返回无效结果时保持手动选择，不打断导入流程。
+    }
+  };
+
   const handleFile = async (file: File | undefined, target: 'bill' | 'erp') => {
     if (!file) return;
     if (target === 'bill' && file.name.toLowerCase().endsWith('.pdf')) {
@@ -439,7 +473,12 @@ export default function ImportDialog({
         );
       } else {
         setErpProfile(profile);
-        setErpMap(autoMapping(profile, true));
+        const mapping = autoMapping(profile, true);
+        setErpMap(mapping);
+        setErpAiSuggested(false);
+        if (!mapping.transactionDate || !mapping.salesAmount) {
+          suggestErpMapping(profile);
+        }
         const detectedStoreCode = inferStoreCode(profile);
         if (detectedStoreCode) {
           setMeta((current) => ({
@@ -769,6 +808,17 @@ export default function ImportDialog({
 
           {step === 2 && (
             <div className="form-stack">
+              {erpAiSuggested && (
+                <div className="template-status matched">
+                  <Check size={17} />
+                  <div>
+                    <strong>ERP 字段映射已由 AI 预填</strong>
+                    <p>
+                      内置别名未命中该文件的表头，已按 AI 建议映射交易日期、销售额等字段，请逐项核对后再继续。
+                    </p>
+                  </div>
+                </div>
+              )}
               <div className="mapping-grid">
                 <MappingPanel
                   title="商场结算单"

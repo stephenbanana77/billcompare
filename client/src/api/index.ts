@@ -15,6 +15,8 @@ import type {
   VisionRefinementCandidate,
   VisionRefinementResult,
   OcrExtractionResult,
+  HeaderMappingInput,
+  HeaderMappingResult,
 } from '@shared/reconciliation';
 import type {
   CollectionRow,
@@ -405,6 +407,12 @@ export const reconciliationApi = {
       data: formData,
     });
   },
+  mapErpHeaders: (input: HeaderMappingInput) =>
+    request<HeaderMappingResult>({
+      url: '/api/reconciliation/header-mappings',
+      method: 'POST',
+      data: input,
+    }),
   refineVisionBill: (
     candidates: VisionRefinementCandidate[],
     tiles: File[],

@@ -70,6 +70,10 @@ const aliases: Record<string, string[]> = {
   transactionDate: [
     '日期',
     '交易日期',
+    '销售日期',
+    '销货日期',
+    '开单日期',
+    '单据日期',
     '营业日期',
     '记账日',
     'businessdate',
@@ -79,6 +83,9 @@ const aliases: Record<string, string[]> = {
   salesAmount: [
     '销售额',
     '销售金额',
+    '含税金额',
+    '价税合计',
+    '销售总额',
     '含税销售额',
     '含税交易总额',
     '营业收入',

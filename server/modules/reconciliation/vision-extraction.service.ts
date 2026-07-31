@@ -12,6 +12,8 @@ import type {
   VisionRefinementResult,
   VisionFieldEvidence,
   VisionFieldKey,
+  ErpHeaderFieldKey,
+  HeaderMappingResult,
 } from '@shared/reconciliation';
 import { enrichDynamicSettlement } from './dynamic-settlement';
 
@@ -297,6 +299,14 @@ const evidenceFirstAddendum = `This is a finance document extraction task. Follo
 7. Return additionalFields for every important labeled header, summary, and fee field that does not fit the standard fields. Each item is { label, value, rawText, page, confidence, group, suggestedTarget }. group is header, summary, fee, or other. suggestedTarget may be one of brandMerchantName, brandName, storeName, storeCode, settlementNo, salesQuantity, taxAmount, netPurchaseAmount, businessMode, counterLocation, productCategory, settlementDate, documentDate, printSequence, previousBalance, or null. A field literally labeled 商场 that describes a floor/counter scenario is counterLocation; 联销 or another settlement method is businessMode.
 8. Return top-level periodEvidence as { rawText, page, kind }. rawText must be the exact visible period text. kind is explicit_range only when both start and end dates are printed, month_only when only YYYY-MM is printed, inferred when the dates were derived, or unknown. Never claim that a derived first day was printed in the PDF. Do not extract detail-table rows in this response.`;
 const metadataSemanticsAddendum = `Metadata semantics: mallName is the mall/project name. storeName is an actual shop name or the brand shown on a "brand" label. Never put a merchant legal entity, supplier, or brand operator into storeName. Put those legal-entity fields in additionalFields with suggestedTarget "brandMerchantName". Put a printed bill/settlement number in additionalFields with suggestedTarget "settlementNo".`;
+
+const erpHeaderMappingPrompt = `你是财务数据字段映射助手。给定一个 ERP/POS 销售流水导出文件的表头列表和样例数据行，把列映射到标准字段。
+标准字段：
+- transactionDate：每笔交易发生的日期列。必须是逐行变化的日期列；不要选"时间"列，也不要选账期/结算周期列。
+- salesAmount：每行实际成交金额（含税销售额）列。必须选"金额"列而不是"单价"列：单价×数量=金额；若同时存在单价列和金额列，选金额列。不要选税额、成本、利润列。
+- refundAmount：退款/退货金额列。
+只输出 JSON：{"mapping":{"transactionDate":string|null,"salesAmount":string|null,"refundAmount":string|null}}。
+value 必须从给定表头列表中原样照抄；没有合适的列就输出 null；不要编造表头列表之外的列名。`;
 
 const compactExtractionPrompt = `Extract compact primary bill data from this Chinese mall settlement bill. Output JSON immediately with no explanation as {"m":[],"p":[],"f":{},"a":[]}.
 m=[mallName,storeName,storeCode,period,billType]. period is only the bill's settlement/accounting period (结算期/账期), as the exact printed YYYY-MM or date range; a contract/agreement validity range is never period. billType is standard, complex, or changed_format.
@@ -698,6 +708,63 @@ export class VisionExtractionService {
           ['confirmed', 'conflict', 'unresolved'].includes(item.status),
       ),
     };
+  }
+
+  /**
+   * Map arbitrary ERP/POS export column headers to the canonical reconciliation
+   * field keys. Reuses the same multimodal chat model with a text-only message;
+   * only header names echoed verbatim from the input list are accepted.
+   */
+  async mapHeadersToFields(
+    headers: string[],
+    sampleRows: Array<Record<string, unknown>> = [],
+  ): Promise<HeaderMappingResult> {
+    if (!this.config.baseUrl || !this.config.apiKey) {
+      throw new BadRequestException(
+        '未配置视觉模型服务，请设置 VISION_LLM_BASE_URL 和 VISION_LLM_API_KEY。',
+      );
+    }
+    const response = await this.postWithRetry('/chat/completions', {
+      model: this.config.model,
+      temperature: 0,
+      reasoning_effort: 'low',
+      max_completion_tokens: 800,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `${erpHeaderMappingPrompt}\n表头列表：${JSON.stringify(headers)}\n样例数据行：${JSON.stringify(sampleRows.slice(0, 3))}`,
+            },
+          ],
+        },
+      ],
+    });
+    const content = response.data?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string') return { mapping: {} };
+    try {
+      const parsed = parseModelJson<{ mapping?: Record<string, unknown> }>(
+        content,
+      );
+      const allowedKeys: ErpHeaderFieldKey[] = [
+        'transactionDate',
+        'salesAmount',
+        'refundAmount',
+      ];
+      const headerSet = new Set(headers);
+      const mapping: HeaderMappingResult['mapping'] = {};
+      for (const key of allowedKeys) {
+        const value = parsed.mapping?.[key];
+        if (typeof value === 'string' && headerSet.has(value)) {
+          mapping[key] = value;
+        }
+      }
+      return { mapping };
+    } catch {
+      return { mapping: {} };
+    }
   }
 
   private async verifyFields(

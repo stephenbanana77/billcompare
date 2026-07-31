@@ -165,6 +165,20 @@ export interface VisionRefinementResult {
   items: VisionRefinementItem[];
 }
 
+export type ErpHeaderFieldKey =
+  | 'transactionDate'
+  | 'salesAmount'
+  | 'refundAmount';
+
+export interface HeaderMappingInput {
+  headers: string[];
+  sampleRows?: Array<Record<string, unknown>>;
+}
+
+export interface HeaderMappingResult {
+  mapping: Partial<Record<ErpHeaderFieldKey, string>>;
+}
+
 export type EvidencePoint = [number, number];
 
 export interface OcrTextBox {

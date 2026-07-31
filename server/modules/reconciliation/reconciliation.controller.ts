@@ -24,6 +24,7 @@ import type {
   SyncEmailSourceInput,
   UpdateVoucherInput,
   VisionRefinementCandidate,
+  HeaderMappingInput,
 } from '@shared/reconciliation';
 import { ReconciliationService } from './reconciliation.service';
 import { VisionExtractionService } from './vision-extraction.service';
@@ -412,6 +413,27 @@ export class ReconciliationController {
     return this.visionExtractionService.refineLowConfidenceFields(
       tiles.map((tile) => tile.buffer),
       candidates,
+    );
+  }
+
+  @Post('header-mappings')
+  async mapErpHeaders(@Body() body: HeaderMappingInput) {
+    const headers = Array.isArray(body?.headers)
+      ? body.headers
+          .filter((header): header is string => typeof header === 'string')
+          .map((header) => header.trim())
+          .filter(Boolean)
+          .slice(0, 80)
+      : [];
+    if (!headers.length) {
+      throw new BadRequestException('请提供需要映射的表头。');
+    }
+    const sampleRows = Array.isArray(body?.sampleRows)
+      ? body.sampleRows.filter(isRecord).slice(0, 3)
+      : [];
+    return this.visionExtractionService.mapHeadersToFields(
+      headers,
+      sampleRows,
     );
   }
 
